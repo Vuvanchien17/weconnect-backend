@@ -1,0 +1,44 @@
+# version: "3.8"
+
+services: # định nghĩa các nhóm container trong project
+  app: # container app nodeJS trong docker
+    build: . # build các image từ file DockerFile
+    container_name: weconnect-backend
+    ports: # mapping port of host -> port in docker
+      - "5000:5000"
+      - "5555:5555"
+    env_file:
+      - .env
+    working_dir: /app
+    volumes: # nạp code từ local vào docker, đồng bộ code
+      - .:/app
+      - /app/node_modules
+    depends_on: # sự ràng buộc giữa các container
+      - redis
+      - mysql-db
+    restart: no # tự động khởi động lại khi app bị crash
+
+  mysql-db:
+    image: mysql:8.0
+    container_name: weconnect-mysql
+    restart: unless-stopped # chỉ khi cố tình stop
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456
+      MYSQL_DATABASE: we-connect
+
+  redis: # container redis trong docker
+    image: redis:alpine # pull image từ Docker Hub
+    container_name: weconnect-redis # tự mình đặt tên
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped # chỉ khi cố tình stop
+
+volumes: # đăng ký disk trong docker để lưu trữ dữ liệu khi chạy vòng đời của container
+  redis-data:
+  mysql-data:

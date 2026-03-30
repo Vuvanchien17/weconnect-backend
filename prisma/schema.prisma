@@ -1,0 +1,226 @@
+generator client {
+  provider   = "prisma-client-js"
+  engineType = "library"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("MYSQL_URI")
+}
+
+// define models
+enum UserStatus {  // for table User
+  active
+  blocked
+}
+
+enum UserRole { // for table User
+  user
+  admin
+}
+
+// define Table User
+model User {
+  id BigInt @id @default(autoincrement())
+
+  isDeleted Boolean @default(false)
+  userName String @unique // not null
+  email String @unique // not null
+  passwordHash String @db.VarChar(255)
+  status UserStatus @default(active)  // allow user uses system
+  role UserRole @default(user)
+  createdAt DateTime @default(now())
+  updatedAt DateTime? @updatedAt
+
+  // function reset password
+  // OTP reset password
+  // reset_password_otp_hash String? @db.VarChar(64)
+  // reset_password_otp_expires DateTime? // can be null
+  // reset_password_otp_attempts Int @default(0)
+
+  // // token allow account reset password
+  // reset_password_token String?  @db.VarChar(255)
+  // reset_password_token_expires DateTime? // can be null
+
+  // 1-1 relation
+  profile Profile?
+  // 1-N relation
+  posts Post[]
+
+  createdTags PostTag[] @relation("TagsCreated")
+  receivedTags PostTag[] @relation("TagsReceived")
+
+  inviterUsers PostCollaborator[] @relation("inviterUser")
+  inviteeUsers PostCollaborator[] @relation("inviteeUser")
+
+}
+
+enum GenderProfile {
+  male
+  female
+  other
+}
+
+// define table Profile
+model Profile {
+  id BigInt @id @default(autoincrement())
+
+  userId BigInt @unique
+  user User @relation(fields: [userId], references: [id])
+
+  displayName String @db.VarChar(255)
+  phoneNumber String? @unique  @db.VarChar(20)
+
+  avatar String? @db.VarChar(255)
+  avatarId String? @db.VarChar(255)  // store public_id of avatar in cloudinary
+
+  coverImage String? @db.VarChar(255)
+  coverImageId String? @db.VarChar(255)  // store public_id of coverImage in cloudinary
+
+  bio String?
+  gender GenderProfile @default(other)
+  birthDay DateTime?
+  location String? @db.VarChar(255)
+  website String? @db.VarChar(255)
+  createdAt DateTime @default(now())
+  updatedAt DateTime? @updatedAt
+}
+
+// define table PostPrivacy
+model PostPrivacy {
+  id Int @id @default(autoincrement())
+  name String // example: public, friends, private
+  description String
+
+  // 1-N relation
+  posts Post[]
+}
+
+
+// define table PostBlock
+model PostBlock {
+  id BigInt @id @default(autoincrement())
+
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  type String
+  position Int  // importance -> sort priority of content post
+
+  content Json
+
+  @@index([postId, position]) // add index for quick query
+}
+
+
+enum TypeFeeling {
+  feeling
+  activity
+}
+
+// define table FeelingMaster
+model FeelingMaster {
+  id Int @id @default(autoincrement())
+  type TypeFeeling
+  displayText String @db.VarChar(50)
+  icon String @db.VarChar(50)
+
+}
+
+
+// define table EventCategory
+model EventCategory {
+  id Int @id @default(autoincrement())
+  keyName String @db.VarChar(255)
+  displayName String @db.VarChar(500)
+  icon String @db.VarChar(50)
+
+  // 1-N relation
+  eventMasters EventMaster[]
+}
+
+// define table EventMaster
+model EventMaster {
+  id Int @id @default(autoincrement())
+
+  eventCategoryId Int
+  eventCategory EventCategory @relation(fields: [eventCategoryId], references: [id])
+
+  keyName String @db.VarChar(255)
+  displayText String @db.VarChar(500)
+  icon String @db.VarChar(50)
+
+}
+
+
+// define table Post
+model Post {
+  id BigInt @id @default(autoincrement())
+
+  userId BigInt
+  user User @relation(fields: [userId], references: [id])
+
+  privacyId Int
+  postPrivacy PostPrivacy @relation(fields: [privacyId], references: [id])
+
+  isDeleted Boolean @default(false)
+  isEdited Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime? @updatedAt
+
+  // 1-N relation
+  postBlocks PostBlock[]
+  postTags PostTag[]
+  postCollaborators PostCollaborator[]
+
+  @@index([userId, createdAt])
+  @@index([isDeleted])  // choose posts do not delete yet
+}
+
+// define table PostTag
+model PostTag {
+  id Int @id @default(autoincrement())
+
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id])
+
+  taggedBy BigInt
+  userBy User @relation("TagsCreated", fields: [taggedBy], references: [id])
+
+  taggedUserId BigInt
+  taggedUser User @relation("TagsReceived",fields: [taggedUserId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@unique([postId, taggedUserId]) // 1 record only have 1 taggedUser
+}
+
+// define table postCollaborator
+enum CollaboratorStatus {
+  pending
+  accepted
+  rejected
+}
+
+model PostCollaborator {
+  id BigInt @id @default(autoincrement())
+
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  inviterId BigInt
+  inviter User @relation("inviterUser", fields: [inviterId], references: [id])
+
+  inviteeId BigInt
+  invitee User @relation("inviteeUser", fields: [inviteeId], references: [id])
+
+  joinedAt DateTime @default(now())
+  respondedAt DateTime?
+
+  status CollaboratorStatus @default(pending)
+
+  // create index
+  @@unique([postId, inviteeId])
+}
+
