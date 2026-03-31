@@ -26,26 +26,17 @@ model User {
   isDeleted Boolean @default(false)
   userName String @unique // not null
   email String @unique // not null
-  passwordHash String @db.VarChar(255)
+  passwordHash String? @db.VarChar(255)
   status UserStatus @default(active)  // allow user uses system
   role UserRole @default(user)
   createdAt DateTime @default(now())
   updatedAt DateTime? @updatedAt
 
-  // function reset password
-  // OTP reset password
-  // reset_password_otp_hash String? @db.VarChar(64)
-  // reset_password_otp_expires DateTime? // can be null
-  // reset_password_otp_attempts Int @default(0)
-
-  // // token allow account reset password
-  // reset_password_token String?  @db.VarChar(255)
-  // reset_password_token_expires DateTime? // can be null
-
   // 1-1 relation
   profile Profile?
   // 1-N relation
   posts Post[]
+  accounts Account[]
 
   createdTags PostTag[] @relation("TagsCreated")
   receivedTags PostTag[] @relation("TagsReceived")
@@ -54,6 +45,39 @@ model User {
   inviteeUsers PostCollaborator[] @relation("inviteeUser")
 
 }
+
+enum AuthType {
+  Oauth
+  credential
+}
+
+enum AuthProvider {
+  google
+  facebook
+  github
+}
+
+model Account {
+  id BigInt @id @default(autoincrement())
+
+  userId BigInt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type AuthType // Oauth or credentials
+  provider AuthProvider // google, facebook, github
+  providerAccountId String // id credential GG/FB provide for user
+
+  // token
+  access_token      String?      @db.Text
+  refresh_token     String?      @db.Text
+  id_token          String?      @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+
+  @@unique([provider, providerAccountId])
+}
+
 
 enum GenderProfile {
   male
