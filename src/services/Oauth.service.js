@@ -3,7 +3,7 @@ import prisma from "../config/prisma.js";
 import Session from "../models/mongoDB/session.model.js";
 
 export const verifyOrCreateUser = async (profile, provider, accessToken) => {
-  const email = profile.email?.[0]?.value;
+  const email = profile.emails?.[0]?.value;
   const providerAccountId = profile?.id;
 
   // check account
