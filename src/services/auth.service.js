@@ -68,7 +68,7 @@ export const signInService = async (userData) => {
   // if match, create accessToken JWT
   const accessToken = jwt.sign(
     { userId: userExists.id },
-    process.env.JWT_SECRECT_KEY,
+    process.env.JWT_SECRET_KEY,
     { expiresIn: process.env.ACCESS_TOKEN_TTL }, // option config
   );
 
@@ -77,7 +77,7 @@ export const signInService = async (userData) => {
 
   // create new Session to save refreshToken
   const userSession = await Session.create({
-    userId: Number(userExists?.id),
+    userId: BigInt(userExists?.id),
     refreshToken: refreshToken,
     expiresAt: new Date(Date.now() + Number(process.env.REFRESH_TOKEN_TTL)),
   });

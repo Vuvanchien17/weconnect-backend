@@ -67,7 +67,7 @@ export const signIn = async (req, res) => {
       res.cookie("refreshToken", refreshToken, {
         // haved in express
         httpOnly: true, // avoid attack XSS
-        secure: true,
+        secure: process.env.NODE_ENV === "production",
         sameSite: "strict", // avoid attack CSRF
         maxAge: Number(process.env.REFRESH_TOKEN_TTL),
       });

@@ -17,6 +17,7 @@ import {
 } from "../validations/user.schema.js";
 import { protectedRoute } from "../middlewares/auth.middleware.js";
 import { checkBlackList } from "../middlewares/checkBlackList.middleware.js";
+import passport from "passport";
 
 const router = express.Router();
 
@@ -35,6 +36,21 @@ router.post("/verify-otp", verifyOTP);
 router.post("/reset-password", resetPassword);
 
 router.post("/resend-otp", resendOTP);
+
+router.get(
+  "/google",
+  passport.authenticate("google", { scope: ["profile", "email"] }),
+);
+
+router.get(
+  "/google/callback",
+  passport.authenticate("google", {
+    failureRedirect: "/signin",
+    session: false,
+  }),
+
+  (req, res) => {},
+);
 
 router.patch(
   "/change-password",
