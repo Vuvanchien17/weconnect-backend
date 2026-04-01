@@ -18,6 +18,7 @@ import {
 import { protectedRoute } from "../middlewares/auth.middleware.js";
 import { checkBlackList } from "../middlewares/checkBlackList.middleware.js";
 import passport from "passport";
+import { handleAuthCallback } from "../controllers/Oauth.controller.js";
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ router.get(
     session: false,
   }),
 
-  (req, res) => {},
+  handleAuthCallback,
 );
 
 router.patch(
