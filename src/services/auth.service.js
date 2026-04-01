@@ -44,11 +44,11 @@ export const signUpService = async (userData) => {
 
 // function signIn
 export const signInService = async (userData) => {
-  const { username, password } = userData;
+  const { username, email, password } = userData;
 
   const userExists = await prisma.user.findFirst({
     where: {
-      userName: username,
+      OR: [{ userName: username }, { email: email }],
     },
   });
 
