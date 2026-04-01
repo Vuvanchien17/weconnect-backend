@@ -6,6 +6,7 @@ import cookieParser from "cookie-parser";
 import connect_MongoDB from "./config/mongodb.js";
 import rootRouter from "./routes/index.route.js";
 import { connectRedis } from "./config/redis.js";
+import passport from "passport";
 
 dotenv.config(); // Load environment variables from .env file
 
@@ -16,6 +17,7 @@ app.use(express.json());
 app.use(cors());
 app.use(morgan("dev"));
 app.use(cookieParser());
+app.use(passport.initialize());
 
 // BigInt to String
 BigInt.prototype.toJSON = function () {

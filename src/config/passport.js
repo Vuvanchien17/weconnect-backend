@@ -1,7 +1,6 @@
 import passport from "passport";
 import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { verifyOrCreateUser } from "../services/Oauth.service.js";
-const FacebookStrategy = Facebook.Strategy;
 
 // config Google
 passport.use(
