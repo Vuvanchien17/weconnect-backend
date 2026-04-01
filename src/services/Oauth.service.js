@@ -58,7 +58,7 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
 };
 
 export const createUserSession = async (user, refreshToken) => {
-  await Session.create({
+  return await Session.create({
     userId: BigInt(user.id),
     refreshToken: refreshToken,
     expiresAt: new Date(Date.now() + Number(process.env.REFRESH_TOKEN_TTL)),
