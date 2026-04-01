@@ -7,7 +7,7 @@ import connect_MongoDB from "./config/mongodb.js";
 import rootRouter from "./routes/index.route.js";
 import { connectRedis } from "./config/redis.js";
 import passport from "passport";
-import "./src/config/passport.js";
+import "./config/passport.js";
 dotenv.config(); // Load environment variables from .env file
 
 const app = express();
