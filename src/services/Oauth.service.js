@@ -37,7 +37,7 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
             provider: toLowerCase(provider),
             providerAccountId: providerAccountId,
             type: "oauth",
-            accessToken: accessToken,
+            access_token: accessToken,
           },
         },
       },
@@ -49,7 +49,7 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
         provider: provider,
         providerAccountId: providerAccountId,
         type: "oauth",
-        accessToken: accessToken,
+        access_token: accessToken,
       },
     });
   }
