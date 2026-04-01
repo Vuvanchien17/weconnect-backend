@@ -17,10 +17,10 @@ import redisClient from "../config/redis.js";
 // function signUp
 export const signUp = async (req, res) => {
   try {
-    const { username, email, password } = req.body;
+    const { email, password } = req.body;
 
     // check user fill all the infomation ?
-    if (!username || !email || !password) {
+    if (!email || !password) {
       return res.status(400).json({
         message: "You need to fill in all the infomation.",
       }); // status 400: Bad request
@@ -54,8 +54,8 @@ export const signUp = async (req, res) => {
 // function signIn
 export const signIn = async (req, res) => {
   try {
-    const { username, email, password } = req.body;
-    if (!username || !password) {
+    const { email, password } = req.body;
+    if (!email || !password) {
       return res.status(400).json({
         message: "You need to fill in all the infomation.",
       });

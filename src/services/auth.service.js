@@ -10,11 +10,11 @@ import { email } from "zod";
 
 // function signUp
 export const signUpService = async (userData) => {
-  const { username, email, password } = userData;
+  const { email, password } = userData;
 
   const userExists = await prisma.user.findFirst({
     where: {
-      OR: [{ userName: username }, { email: email }],
+      email: email,
     },
   });
 
@@ -34,7 +34,6 @@ export const signUpService = async (userData) => {
   // create new User
   const newUser = await prisma.user.create({
     data: {
-      userName: username,
       email,
       passwordHash,
     },
@@ -44,11 +43,11 @@ export const signUpService = async (userData) => {
 
 // function signIn
 export const signInService = async (userData) => {
-  const { username, email, password } = userData;
+  const { email, password } = userData;
 
   const userExists = await prisma.user.findFirst({
     where: {
-      OR: [{ userName: username }, { email: email }],
+      email: email,
     },
   });
 
