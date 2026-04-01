@@ -2,12 +2,6 @@ import { email, z } from "zod";
 import { REGEX } from "../utils/constants.js";
 
 const userCore = {
-  username: z
-    .string()
-    .trim()
-    .min(3, "Too short")
-    .max(30, "Too long")
-    .regex(REGEX.USERNAME),
   email: z
     .string()
     .trim()
