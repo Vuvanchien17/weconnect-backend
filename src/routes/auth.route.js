@@ -7,6 +7,7 @@ import {
   resetPassword,
   signIn,
   signOut,
+  signOutAll,
   signUp,
   verifyOTP,
 } from "../controllers/auth.controller.js";
@@ -27,6 +28,8 @@ router.post("/signin", signIn);
 router.post("/signup", validate(signUpSchema), signUp);
 
 router.post("/signout", protectedRoute, checkBlackList, signOut); // chánh tấn công CSRF
+
+router.post("/signout-all", protectedRoute, checkBlackList, signOutAll);
 
 router.post("/refresh", refreshToken);
 
