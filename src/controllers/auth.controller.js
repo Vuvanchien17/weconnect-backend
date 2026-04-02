@@ -7,6 +7,7 @@ import {
   resendOTPService,
   resetPasswordService,
   signInService,
+  signOutAllService,
   signOutService,
   signUpService,
   verifyOTPService,
@@ -153,7 +154,7 @@ export const refreshToken = async (req, res) => {
   } catch (error) {
     console.log("Refresh error:", error.message);
     res.clearCookie("refreshToken");
-    return res.status(403).json({
+    return res.status(401).json({
       message: "Session expired. Please login again.",
     });
   }
@@ -302,6 +303,41 @@ export const resendOTP = async (req, res) => {
       });
     }
 
+    return res.status(500).json({
+      message: "Internal Server Error.",
+    });
+  }
+};
+
+export const signOutAll = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ message: "Token not exists!" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.decode(token);
+    const timeLeft = decoded.exp - Math.floor(Date.now() / 1000);
+
+    if (timeLeft > 0) {
+      await redisClient.setEx(`blacklist:${token}`, timeLeft, "true");
+    }
+
+    await signOutAllService(userId);
+
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production", // Nếu dùng HTTPS
+      sameSite: "none",
+    });
+
+    return res.status(200).json({
+      message: "Sign out all device successfully",
+    });
+  } catch (error) {
+    console.log("Error sign out all :", error);
     return res.status(500).json({
       message: "Internal Server Error.",
     });
