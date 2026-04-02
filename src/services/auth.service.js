@@ -114,7 +114,7 @@ export const refreshTokenService = async (refreshToken) => {
   // create new accessToken
   const newAccessToken = jwt.sign(
     { userId: userSession?.userId },
-    process.env.JWT_SECRECT_KEY,
+    process.env.JWT_SECRET_KEY,
     { expiresIn: process.env.ACCESS_TOKEN_TTL }, // option config
   );
 

@@ -12,10 +12,10 @@ passport.use(
     },
     async (accessToken, refreshToken, profile, done) => {
       try {
-        console.log(profile);
         const user = await verifyOrCreateUser(profile, "google", accessToken);
         return done(null, user);
       } catch (error) {
+        console.error("Error verify: ", error);
         return done(error, null);
       }
     },

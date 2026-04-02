@@ -40,13 +40,14 @@ router.post("/resend-otp", resendOTP);
 
 router.get(
   "/google",
-  passport.authenticate("google", { scope: ["profile", "email"] }),
+  passport.authenticate("google", {
+    scope: ["profile", "email"],
+  }),
 );
 
 router.get(
   "/google/callback",
   passport.authenticate("google", {
-    failureRedirect: "/signin",
     session: false,
   }),
 

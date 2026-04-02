@@ -19,7 +19,7 @@ export const protectedRoute = async (req, res, next) => {
     // 3. Verify JWT (Nên dùng dạng Promise để đồng nhất với async/await)
     jwt.verify(
       accessToken,
-      process.env.JWT_SECRECT_KEY,
+      process.env.JWT_SECRET_KEY,
       async (error, decodedUser) => {
         if (error) {
           console.log("Error jwt: ", error.message);

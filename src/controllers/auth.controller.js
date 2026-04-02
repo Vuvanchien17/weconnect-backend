@@ -119,8 +119,8 @@ export const signOut = async (req, res) => {
     }
     res.clearCookie("refreshToken", {
       httpOnly: true,
-      secure: true, // true nếu dùng https
-      sameSite: "strict",
+      secure: process.env.NODE_ENV === "production", // true nếu dùng https
+      sameSite: "lax",
     });
 
     return res.status(200).json({

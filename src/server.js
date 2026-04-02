@@ -14,7 +14,12 @@ const app = express();
 const PORT = 5000;
 
 app.use(express.json());
-app.use(cors());
+app.use(
+  cors({
+    origin: true, // Cho phép mọi origin (hoặc dùng "*" nếu không dùng credentials)
+    credentials: true, // BẮT BUỘC để trình duyệt chịu lưu Cookie
+  }),
+);
 app.use(morgan("dev"));
 app.use(cookieParser());
 app.use(passport.initialize());

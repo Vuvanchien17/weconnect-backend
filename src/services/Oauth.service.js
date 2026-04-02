@@ -1,4 +1,3 @@
-import { toLowerCase } from "zod";
 import prisma from "../config/prisma.js";
 import Session from "../models/mongoDB/session.model.js";
 
@@ -14,6 +13,7 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
         providerAccountId: providerAccountId,
       },
     },
+    include: { user: true },
   });
 
   if (account) {
@@ -21,7 +21,7 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
   }
 
   // check user
-  const user = await prisma.user.findUnique({
+  let user = await prisma.user.findUnique({
     where: {
       email: email,
     },
@@ -29,12 +29,12 @@ export const verifyOrCreateUser = async (profile, provider, accessToken) => {
 
   if (!user) {
     // create new (User + Account)
-    await prisma.user.create({
+    user = await prisma.user.create({
       data: {
         email: email,
         accounts: {
           create: {
-            provider: toLowerCase(provider),
+            provider: provider.toLowerCase(),
             providerAccountId: providerAccountId,
             type: "oauth",
             access_token: accessToken,

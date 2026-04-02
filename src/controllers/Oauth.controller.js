@@ -1,4 +1,6 @@
 import { createUserSession } from "../services/Oauth.service.js";
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
 
 export const handleAuthCallback = async (req, res) => {
   try {
@@ -20,9 +22,8 @@ export const handleAuthCallback = async (req, res) => {
       // haved in express
       httpOnly: true, // avoid attack XSS
       secure: process.env.NODE_ENV === "production",
-      sameSite: "lax", // avoid attack CSRF
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", // avoid attack CSRF
       maxAge: Number(process.env.REFRESH_TOKEN_TTL),
-      path: "/",
     });
 
     const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5000";
