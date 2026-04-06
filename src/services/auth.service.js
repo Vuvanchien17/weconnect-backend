@@ -295,3 +295,7 @@ export const resendOTPService = async (email) => {
     );
   }
 };
+
+export const signOutAllService = async (userId) => {
+  return await Session.deleteMany({ userId: userId });
+};
