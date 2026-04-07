@@ -19,9 +19,6 @@ export const signUpService = async (userData) => {
   });
 
   if (userExists) {
-    if (userExists.userName === username) {
-      throw new Error("username exists.");
-    }
     if (userExists.email === email) {
       throw new Error("email exists.");
     }
