@@ -80,3 +80,34 @@ export const searchUsersService = async (keyword, currentUserId) => {
     avatar: user?.profile?.avatar || null,
   }));
 };
+
+export const fillBaseProfileService = async (userId, userData) => {
+  const { displayName, phoneNumber, gender, birthDay } = userData;
+  return await prisma.$transaction(async (tx) => {
+    await tx.profile.create({
+      data: {
+        userId: userId,
+        displayName,
+        phoneNumber,
+        gender,
+        birthDay: new Date(userData.birthDay),
+      },
+    });
+
+    // update User
+    const updatedUser = await tx.user.update({
+      where: { id: userId },
+      data: {
+        isProfileComplete: true, // "Chìa khóa" để lần sau vào thẳng Home
+      },
+      select: {
+        id: true,
+        email: true,
+        isProfileComplete: true,
+        // Không trả về password ở đây nhé
+      },
+    });
+
+    return updatedUser;
+  });
+};
