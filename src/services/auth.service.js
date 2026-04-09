@@ -6,20 +6,20 @@ import Session from "../models/mongoDB/session.model.js";
 import redisClient from "../config/redis.js";
 import otpTemplate from "../utils/mailTemplate.js";
 import transporter from "../config/mail.js";
-import { email } from "zod";
 
 // function signUp
 export const signUpService = async (userData) => {
   const { email, password } = userData;
 
+  const emailLowerCase = email.toLowerCase().trim();
   const userExists = await prisma.user.findFirst({
     where: {
-      email: email,
+      email: emailLowerCase,
     },
   });
 
   if (userExists) {
-    if (userExists.email === email) {
+    if (userExists.email === emailLowerCase) {
       throw new Error("email exists.");
     }
   }
@@ -31,7 +31,7 @@ export const signUpService = async (userData) => {
   // create new User
   const newUser = await prisma.user.create({
     data: {
-      email,
+      email: emailLowerCase,
       passwordHash,
     },
   });
@@ -42,9 +42,10 @@ export const signUpService = async (userData) => {
 export const signInService = async (userData) => {
   const { email, password } = userData;
 
+  const emailLowerCase = email.toLowerCase().trim();
   const userExists = await prisma.user.findFirst({
     where: {
-      email: email,
+      email: emailLowerCase,
     },
   });
 
@@ -135,9 +136,10 @@ export const changePasswordService = async (userId, newPassword) => {
 // function forgot-password
 export const forgotPasswordService = async (email) => {
   // 1. Kiểm tra user tồn tại
+  const emailLowerCase = email.toLowerCase().trim();
   const user = await prisma.user.findUnique({
     where: {
-      email: email,
+      email: emailLowerCase,
     },
   });
 
@@ -149,12 +151,12 @@ export const forgotPasswordService = async (email) => {
   const OTP = Math.floor(100000 + Math.random() * 900000);
 
   // 3. Lưu OTP vào Redis
-  await redisClient.setEx(`otp:${email}`, 300, OTP.toString());
+  await redisClient.setEx(`otp:${emailLowerCase}`, 300, OTP.toString());
 
   // 4. Gửi mail (dùng file mail.js bạn đã có)
   const mailOptions = {
     from: "Weconnect",
-    to: email,
+    to: emailLowerCase,
     subject: "Mã OTP khôi phục mật khẩu - WeConnect",
     html: otpTemplate(OTP),
   };
@@ -162,7 +164,7 @@ export const forgotPasswordService = async (email) => {
   try {
     return await transporter.sendMail(mailOptions);
   } catch (error) {
-    await redisClient.del(`otp:${email}`);
+    await redisClient.del(`otp:${emailLowerCase}`);
     throw new Error(
       "Unable to send emails at this time. Please try again later!",
     );
@@ -171,8 +173,9 @@ export const forgotPasswordService = async (email) => {
 
 // function verify-otp
 export const verifyOTPService = async (OTPCode, email) => {
-  const retryKey = `otp_retries:${email}`;
-  const otpKey = `otp:${email}`;
+  const emailLowerCase = email.toLowerCase().trim();
+  const retryKey = `otp_retries:${emailLowerCase}`;
+  const otpKey = `otp:${emailLowerCase}`;
 
   // check isLock?
   const retries = await redisClient.get(retryKey);
@@ -208,7 +211,7 @@ export const verifyOTPService = async (OTPCode, email) => {
   const resetToken = crypto.randomBytes(32).toString("hex");
 
   // expire 15p
-  await redisClient.setEx(`resetToken:${email}`, 900, resetToken);
+  await redisClient.setEx(`resetToken:${emailLowerCase}`, 900, resetToken);
 
   // if match OTP code => delete OTP code and retryKey
   await redisClient.del(otpKey);
@@ -220,7 +223,8 @@ export const verifyOTPService = async (OTPCode, email) => {
 //function reset-password
 export const resetPasswordService = async (email, newPassword, resetToken) => {
   // Check resetToken in redis
-  const storedToken = await redisClient.get(`resetToken:${email}`);
+  const emailLowerCase = email.toLowerCase().trim();
+  const storedToken = await redisClient.get(`resetToken:${emailLowerCase}`);
 
   if (!storedToken || storedToken !== resetToken) {
     throw new Error("Invalid or expired token");
@@ -233,7 +237,7 @@ export const resetPasswordService = async (email, newPassword, resetToken) => {
   // update table User
   await prisma.user.update({
     where: {
-      email: email,
+      email: emailLowerCase,
     },
     data: {
       passwordHash: hashedPassword,
@@ -241,15 +245,16 @@ export const resetPasswordService = async (email, newPassword, resetToken) => {
   });
 
   // del token in redis
-  await redisClient.del(`resetToken:${email}`);
+  await redisClient.del(`resetToken:${emailLowerCase}`);
 
   return hashedPassword;
 };
 
 // function resend-otp
 export const resendOTPService = async (email) => {
-  const cooldownKey = `otp_cooldown:${email}`;
-  const retryKey = `otp_retries:${email}`;
+  const emailLowerCase = email.toLowerCase().trim();
+  const cooldownKey = `otp_cooldown:${emailLowerCase}`;
+  const retryKey = `otp_retries:${emailLowerCase}`;
 
   // resend after 60s
   const isCooldown = await redisClient.get(cooldownKey);
@@ -264,17 +269,17 @@ export const resendOTPService = async (email) => {
   }
 
   // delete old otp
-  await redisClient.del(`otp:${email}`);
+  await redisClient.del(`otp:${emailLowerCase}`);
 
   // create new otp
   const OTP = Math.floor(100000 + Math.random() * 900000);
 
   // save new otp into Redis
-  await redisClient.setEx(`otp:${email}`, 300, OTP.toString());
+  await redisClient.setEx(`otp:${emailLowerCase}`, 300, OTP.toString());
 
   const mailOptions = {
     from: "Weconnect",
-    to: email,
+    to: emailLowerCase,
     subject: "Mã OTP khôi phục mật khẩu - WeConnect",
     html: otpTemplate(OTP),
   };
@@ -286,7 +291,7 @@ export const resendOTPService = async (email) => {
 
     return await transporter.sendMail(mailOptions);
   } catch (error) {
-    await redisClient.del(`otp:${email}`);
+    await redisClient.del(`otp:${emailLowerCase}`);
     throw new Error(
       "Unable to send emails at this time. Please try again later!",
     );

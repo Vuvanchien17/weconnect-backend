@@ -1,5 +1,6 @@
 import { cloudinary } from "../config/cloudinary.js";
 import {
+  fillBaseProfileService,
   getProfileByUserId,
   searchUsersService,
   updateProfileService,
@@ -110,6 +111,29 @@ export const searchUsers = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+export const fillBaseProfile = async (req, res) => {
+  try {
+    const { displayName, phoneNumber, gender, birthDay } = req.body;
+    const userId = req.user.id;
+
+    if (!displayName || !phoneNumber || !gender || !birthDay) {
+      return res.status(400).json({
+        message: "Please fill in all the information",
+      });
+    }
+
+    const updatedUser = await fillBaseProfileService(userId, req.body);
+
+    return res.status(200).json({
+      message: "Profile updated!",
+      data: updatedUser,
+    });
+  } catch (error) {
+    console.log("Error fill base profile: ", error);
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };

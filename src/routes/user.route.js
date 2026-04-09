@@ -1,6 +1,7 @@
 import express from "express";
 import {
   authMe,
+  fillBaseProfile,
   searchUsers,
   updateProfile,
 } from "../controllers/user.controller.js";
@@ -20,6 +21,8 @@ router.put(
   validate(profileSchema),
   updateProfile,
 );
+
+router.post("/infor", fillBaseProfile);
 
 router.get("/search", searchUsers);
 
