@@ -77,7 +77,7 @@ export const signIn = async (req, res) => {
         message: "Login successful!",
         data: {
           accessToken: accessToken,
-          user: { id: user.id, username: user.userName },
+          user: { id: user.id, isProfileComplete: user.isProfileComplete },
         },
       });
     } else {
