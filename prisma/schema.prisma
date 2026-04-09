@@ -24,6 +24,7 @@ model User {
   id BigInt @id @default(autoincrement())
 
   isDeleted Boolean @default(false)
+  isProfileComplete Boolean @default(false)
   userName String? @unique // use for profile/username
   email String @unique // not null
   passwordHash String? @db.VarChar(255)
