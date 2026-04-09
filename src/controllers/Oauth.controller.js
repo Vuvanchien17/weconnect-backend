@@ -6,6 +6,9 @@ export const handleAuthCallback = async (req, res) => {
   try {
     const user = req.user;
 
+    // check state of Profile
+    const isComplete = user.isProfileComplete;
+
     // create JWT for user using Weconnect
     const accessToken = jwt.sign(
       { userId: user.id },
@@ -26,8 +29,8 @@ export const handleAuthCallback = async (req, res) => {
       maxAge: Number(process.env.REFRESH_TOKEN_TTL),
     });
 
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5000";
-    const redirectUrl = `${frontendUrl}/auth-success?accessToken=${accessToken}`;
+    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+    const redirectUrl = `${frontendUrl}/auth-success?accessToken=${accessToken}&isComplete=${isComplete}`;
     return res.redirect(redirectUrl);
   } catch (error) {
     console.error("OAuth Callback Error:", error);
