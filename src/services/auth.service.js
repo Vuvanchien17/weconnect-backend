@@ -151,7 +151,7 @@ export const forgotPasswordService = async (email) => {
   const OTP = Math.floor(100000 + Math.random() * 900000);
 
   // 3. Lưu OTP vào Redis
-  await redisClient.setEx(`otp:${emailLowerCase}`, 300, OTP.toString());
+  await redisClient.setEx(`otp:${emailLowerCase}`, 60, OTP.toString());
 
   // 4. Gửi mail (dùng file mail.js bạn đã có)
   const mailOptions = {
@@ -174,15 +174,7 @@ export const forgotPasswordService = async (email) => {
 // function verify-otp
 export const verifyOTPService = async (OTPCode, email) => {
   const emailLowerCase = email.toLowerCase().trim();
-  const retryKey = `otp_retries:${emailLowerCase}`;
   const otpKey = `otp:${emailLowerCase}`;
-
-  // check isLock?
-  const retries = await redisClient.get(retryKey);
-  if (retries && parseInt(retries) >= 5) {
-    await redisClient.del(otpKey);
-    throw new Error("Your account is locked. Please try again in 5 minutes");
-  }
 
   const storedOTP = await redisClient.get(otpKey);
 
@@ -190,21 +182,8 @@ export const verifyOTPService = async (OTPCode, email) => {
     throw new Error("The OTP code has expired or does not exist");
   }
 
-  // logic when enter error
   if (storedOTP !== OTPCode) {
-    const currentRetries = await redisClient.incr(retryKey);
-
-    if (currentRetries === 1) {
-      await redisClient.expire(retryKey, 300); // lock 5p
-    }
-
-    const remaining = 5 - currentRetries;
-    if (remaining <= 0) {
-      throw new Error(
-        "You have entered the wrong information more than 5 times. Your account will be temporarily suspended for 5 minutes",
-      );
-    }
-    throw new Error(`OTP code incorrect, you have ${remaining} more attempts`);
+    throw new Error("OTP code incorrect");
   }
 
   // create resetToken return for user
@@ -213,9 +192,8 @@ export const verifyOTPService = async (OTPCode, email) => {
   // expire 15p
   await redisClient.setEx(`resetToken:${emailLowerCase}`, 900, resetToken);
 
-  // if match OTP code => delete OTP code and retryKey
+  // if match OTP code => delete OTP code
   await redisClient.del(otpKey);
-  await redisClient.del(retryKey);
 
   return resetToken;
 };
@@ -275,7 +253,7 @@ export const resendOTPService = async (email) => {
   const OTP = Math.floor(100000 + Math.random() * 900000);
 
   // save new otp into Redis
-  await redisClient.setEx(`otp:${emailLowerCase}`, 300, OTP.toString());
+  await redisClient.setEx(`otp:${emailLowerCase}`, 60, OTP.toString());
 
   const mailOptions = {
     from: "Weconnect",

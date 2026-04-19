@@ -231,7 +231,7 @@ export const verifyOTP = async (req, res) => {
     const result = await verifyOTPService(otp, email);
     return res.status(200).json({
       message: "Verify OTP successfully",
-      result: result,
+      resetToken: result,
     });
   } catch (error) {
     if (error.message) {
@@ -298,7 +298,7 @@ export const resendOTP = async (req, res) => {
     }
   } catch (error) {
     if (error.message) {
-      return res.status(400).json({
+      return res.status(429).json({
         message: error.message,
       });
     }
