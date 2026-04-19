@@ -15,7 +15,7 @@ const otpTemplate = (otpCode) => {
           </span>
         </div>
         
-        <p style="font-size: 14px; color: #666;">Mã này sẽ hết hạn sau <b>120 giây</b>. Nếu bạn không yêu cầu thay đổi này, hãy bỏ qua email này để đảm bảo an toàn.</p>
+        <p style="font-size: 14px; color: #666;">Mã này sẽ hết hạn sau <b>60 giây</b>. Nếu bạn không yêu cầu thay đổi này, hãy bỏ qua email này để đảm bảo an toàn.</p>
         <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
         <p style="font-size: 12px; color: #999; text-align: center;">
           © 2026 WeConnect Team. All rights reserved.<br>
