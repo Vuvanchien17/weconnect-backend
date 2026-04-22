@@ -45,6 +45,18 @@ model User {
   inviterUsers PostCollaborator[] @relation("inviterUser")
   inviteeUsers PostCollaborator[] @relation("inviteeUser")
 
+  // Friendship (2 chiều, lưu 2 dòng A->B và B->A)
+  friendships Friendship[] @relation("FriendshipUser")
+  friendOf    Friendship[] @relation("FriendshipFriend")
+
+  // Friend request (1 chiều: sender -> receiver)
+  sentFriendRequests     FriendRequest[] @relation("FriendRequestSender")
+  receivedFriendRequests FriendRequest[] @relation("FriendRequestReceiver")
+
+  // Block user
+  blockedUsers   UserBlock[] @relation("UserBlockBlocker")
+  blockedByUsers UserBlock[] @relation("UserBlockBlocked")
+
 }
 
 enum AuthType {
@@ -247,5 +259,66 @@ model PostCollaborator {
 
   // create index
   @@unique([postId, inviteeId])
+}
+
+
+// define table Friendship
+// Lưu 2 dòng (A,B) và (B,A) cho quan hệ bạn bè 2 chiều
+// CHECK userId != friendId — enforce ở application layer (Prisma không support CHECK constraint)
+model Friendship {
+  userId BigInt
+  user User @relation("FriendshipUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  friendId BigInt
+  friend User @relation("FriendshipFriend", fields: [friendId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([userId, friendId])
+  @@index([userId, createdAt]) // phân trang theo thời gian kết bạn
+}
+
+
+// define table FriendRequest
+enum FriendRequestStatus {
+  pending
+  accepted
+  rejected
+}
+
+// CHECK senderId != receiverId — enforce ở application layer
+// Xóa row sau khi accept/reject hoặc sau N ngày (cron job)
+model FriendRequest {
+  id BigInt @id @default(autoincrement())
+
+  senderId BigInt
+  sender User @relation("FriendRequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+
+  receiverId BigInt
+  receiver User @relation("FriendRequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  status FriendRequestStatus @default(pending)
+
+  createdAt DateTime @default(now())
+  respondedAt DateTime?
+
+  @@unique([senderId, receiverId]) // giả định xóa sau khi xử lý
+  @@index([receiverId, status, createdAt]) // inbox: lời mời đến mình
+  @@index([senderId, status, createdAt])   // outbox: lời mời mình đã gửi
+}
+
+
+// define table UserBlock
+model UserBlock {
+  blockerId BigInt
+  blocker User @relation("UserBlockBlocker", fields: [blockerId], references: [id], onDelete: Cascade)
+
+  blockedId BigInt
+  blocked User @relation("UserBlockBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([blockerId, blockedId])
+  @@index([blockedId]) // check "mình có đang bị ai block không"
 }
 
