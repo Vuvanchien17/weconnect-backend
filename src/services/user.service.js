@@ -40,6 +40,54 @@ export const getUserById = async (userId) => {
   });
 };
 
+// Lấy full thông tin user (join User + Profile) rồi flatten thành 1 object phẳng
+export const getMeService = async (userId) => {
+  const user = await prisma.user.findUnique({
+    where: { id: BigInt(userId) },
+    select: {
+      id: true,
+      email: true,
+      userName: true,
+      isProfileComplete: true,
+      status: true,
+      role: true,
+      createdAt: true,
+      updatedAt: true,
+      // join với Profile
+      profile: {
+        select: {
+          displayName: true,
+          avatar: true,
+          coverImage: true,
+          phoneNumber: true,
+          gender: true,
+          birthDay: true,
+          bio: true,
+          location: true,
+          website: true,
+        },
+      },
+    },
+  });
+
+  if (!user) return null;
+
+  const { profile, ...userFields } = user;
+
+  return {
+    ...userFields,
+    displayName: profile?.displayName || null,
+    avatar: profile?.avatar || null,
+    coverImage: profile?.coverImage || null,
+    phoneNumber: profile?.phoneNumber || null,
+    gender: profile?.gender || null,
+    birthDay: profile?.birthDay || null,
+    bio: profile?.bio || null,
+    location: profile?.location || null,
+    website: profile?.website || null,
+  };
+};
+
 export const searchUsersService = async (keyword, currentUserId) => {
   const users = await prisma.user.findMany({
     where: {

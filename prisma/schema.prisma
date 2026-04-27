@@ -57,6 +57,9 @@ model User {
   blockedUsers   UserBlock[] @relation("UserBlockBlocker")
   blockedByUsers UserBlock[] @relation("UserBlockBlocked")
 
+  // Reaction on post
+  postReactions PostReaction[]
+
 }
 
 enum AuthType {
@@ -210,6 +213,7 @@ model Post {
   postBlocks PostBlock[]
   postTags PostTag[]
   postCollaborators PostCollaborator[]
+  postReactions PostReaction[]
 
   @@index([userId, createdAt])
   @@index([isDeleted])  // choose posts do not delete yet
@@ -320,5 +324,36 @@ model UserBlock {
 
   @@id([blockerId, blockedId])
   @@index([blockedId]) // check "mình có đang bị ai block không"
+}
+
+
+// define table ReactionMaster
+// 7 loại reaction giống Facebook: like, love, care, haha, wow, sad, angry
+model ReactionMaster {
+  id Int @id @default(autoincrement())
+  keyName String @db.VarChar(30)      // like, love, care, haha, wow, sad, angry
+  displayText String @db.VarChar(50)  // Like, Love, Care, Haha, Wow, Sad, Angry
+  icon String @db.VarChar(50)
+
+  // 1-N relation
+  postReactions PostReaction[]
+}
+
+
+// define table PostReaction
+// Composite PK (postId, userId) — 1 user chỉ có 1 reaction trên 1 post (đổi emoji = update reactionId)
+model PostReaction {
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  userId BigInt
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  reactionId Int
+  reaction ReactionMaster @relation(fields: [reactionId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@id([postId, userId])
 }
 

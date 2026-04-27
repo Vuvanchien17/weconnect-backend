@@ -1,22 +1,29 @@
 import { cloudinary } from "../config/cloudinary.js";
 import {
   fillBaseProfileService,
+  getMeService,
   getProfileByUserId,
   searchUsersService,
   updateProfileService,
 } from "../services/user.service.js";
 
-export const authMe = (req, res) => {
+export const authMe = async (req, res) => {
   try {
-    const user = req?.user; // get user from middleware
+    const userId = req.user.id;
+    const user = await getMeService(userId);
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
     return res.status(200).json({
       message: "Get user information successfully.",
       data: {
-        user: user,
+        user,
       },
     });
   } catch (error) {
-    console.error("Error in getMyProfile:", error);
+    console.error("Error in authMe:", error);
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };

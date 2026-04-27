@@ -255,6 +255,23 @@ async function main() {
       data: postPrivacy,
     });
   }
+
+  // reactionMaster — 7 loại reaction giống Facebook
+  const reactions = [
+    { keyName: "like", displayText: "Like", icon: "👍" },
+    { keyName: "love", displayText: "Love", icon: "❤️" },
+    { keyName: "care", displayText: "Care", icon: "🤗" },
+    { keyName: "haha", displayText: "Haha", icon: "😂" },
+    { keyName: "wow", displayText: "Wow", icon: "😮" },
+    { keyName: "sad", displayText: "Sad", icon: "😢" },
+    { keyName: "angry", displayText: "Angry", icon: "😡" },
+  ];
+
+  for (const reaction of reactions) {
+    await prisma.reactionMaster.create({
+      data: reaction,
+    });
+  }
 }
 
 main()
