@@ -53,20 +53,29 @@ prisma/
 
 ### ✅ Post
 
-- Tạo bài đăng với rich blocks: text, image, video, embed, location, feeling, event
+- CRUD đầy đủ: create / get / update / delete
+- Rich blocks: text, image, video, embed, location, feeling, event
 - Tags, collaborators
 
-### 🔲 Chưa có API (schema MongoDB đã có)
+### ✅ Reaction (Post)
 
-- Notification
-- Conversation
-- Message
+- Bảng `reaction_master` (loại reaction) + `post_reaction` (user ↔ post ↔ loại)
+- Service xử lý react / unreact / đổi loại reaction trên cùng 1 post
+- Validate payload bằng Zod (`src/validations/reaction.schema.js`)
+- Seed `reaction_master` qua `prisma/seed.js`
+
+### 🔲 Schema-only (chưa có API)
+
+- Friend system: `FriendShip`, `FriendRequest`, `UserBlock` (Prisma)
+- MongoDB: Notification, Conversation, Message (Mongoose)
 
 ## Branch & trạng thái hiện tại
 
-- **Branch hiện tại**: `feat-forgot-password`
-- **Trạng thái**: Toàn bộ forgot password flow đã hoàn thành (forgotPassword → verifyOTP → resetPassword → resendOTP)
-- Trước khi tạo branch mới, hỏi lại nếu chưa rõ feature nào đang active
+- **Branch vừa merge**: `feat-CRUD-post` → `main` (PR #4, merge commit `bf77cfa`)
+  - CRUD Post đầy đủ + hệ thống Reaction
+  - Thêm models Friend/Block (schema-only, chưa có API)
+- **Trạng thái**: chưa có branch feature mới đang active
+- Trước khi tạo branch mới, hỏi lại nếu chưa rõ feature nào sẽ làm tiếp
 
 ## Conventions
 
