@@ -52,11 +52,11 @@ export const getPostById = async (req, res) => {
 
 export const getPosts = async (req, res) => {
   try {
-    const { userId, page, limit } = req.query;
+    const { userId, cursor, limit } = req.query;
     const currentUserId = req.user.id;
     const result = await getPostsService({
       userId,
-      page,
+      cursor,
       limit,
       currentUserId,
     });
