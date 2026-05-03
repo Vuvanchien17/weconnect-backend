@@ -1,6 +1,7 @@
 import prisma from "../config/prisma.js";
 import { cloudinary } from "../config/cloudinary.js";
 import { buildReactionStatsMap } from "./reaction.service.js";
+import { buildCommentStatsMap } from "./comment.service.js";
 
 // include structure dùng chung khi trả về post đầy đủ
 const fullPostInclude = {
@@ -198,47 +199,64 @@ export const getPostByIdService = async (postId, currentUserId) => {
 
   if (!post) return null;
 
-  const statsMap = await buildReactionStatsMap([post.id], currentUserId);
+  // Bulk-fetch song song reaction + comment stats cho 1 post
+  const [reactionStatsMap, commentStatsMap] = await Promise.all([
+    buildReactionStatsMap([post.id], currentUserId),
+    buildCommentStatsMap([post.id]),
+  ]);
+
   const formatted = formatPost(post);
+  const key = post.id.toString();
   return {
     ...formatted,
-    stats: { reactions: statsMap.get(post.id.toString()) },
+    stats: {
+      reactions: reactionStatsMap.get(key),
+      comments: commentStatsMap.get(key),
+    },
   };
 };
 
 // ============ READ LIST ============
-// offset pagination theo page/limit. userId optional để lọc post của 1 user.
+// CURSOR pagination cho infinite scroll. userId optional để lọc post của 1 user.
+// - cursor: id của post cuối cùng đã load (string vì BigInt). Lần đầu không cần.
+// - limit: 10 mặc định, max 50.
+// - Trick "+1": fetch take+1 row → biết còn page tiếp không mà không cần count query riêng.
 // stats.reactions: { total, topTypes (top 3 emoji), myReaction }
-// TODO: thêm comments/shares vào stats sau khi làm xong comment & share
-export const getPostsService = async ({ userId, page, limit, currentUserId }) => {
-  const currentPage = Math.max(Number(page) || 1, 1);
+// stats.comments: { total }
+// TODO: thêm shares vào stats sau khi làm xong feature share
+export const getPostsService = async ({ userId, cursor, limit, currentUserId }) => {
   const take = Math.min(Math.max(Number(limit) || 10, 1), 50);
-  const skip = (currentPage - 1) * take;
 
   const where = {
     isDeleted: false,
     ...(userId && { userId: BigInt(userId) }),
   };
 
-  const [totalPosts, posts] = await prisma.$transaction([
-    prisma.post.count({ where }),
-    prisma.post.findMany({
-      where,
-      skip,
-      take,
-      orderBy: { id: "desc" },
-      include: fullPostInclude,
+  const posts = await prisma.post.findMany({
+    where,
+    take: take + 1, // lấy dư 1 row để biết hasNext
+    ...(cursor && {
+      cursor: { id: BigInt(cursor) },
+      skip: 1, // skip cursor row (đã trả ở lần trước)
     }),
+    orderBy: { id: "desc" },
+    include: fullPostInclude,
+  });
+
+  const hasNext = posts.length > take;
+  const items = hasNext ? posts.slice(0, take) : posts;
+  const nextCursor = hasNext ? items[items.length - 1].id.toString() : null;
+
+  // Bulk-fetch song song reaction + comment stats cho tất cả post của page
+  const postIds = items.map((p) => p.id);
+  const [reactionStatsMap, commentStatsMap] = await Promise.all([
+    buildReactionStatsMap(postIds, currentUserId),
+    buildCommentStatsMap(postIds),
   ]);
 
-  // Bulk-fetch reaction stats cho tất cả post của page này
-  const postIds = posts.map((p) => p.id);
-  const statsMap = await buildReactionStatsMap(postIds, currentUserId);
-
-  const totalPages = Math.ceil(totalPosts / take);
-
-  const data = posts.map((p) => {
+  const data = items.map((p) => {
     const formatted = formatPost(p);
+    const key = p.id.toString();
     return {
       id: formatted.id,
       author: {
@@ -251,20 +269,22 @@ export const getPostsService = async ({ userId, page, limit, currentUserId }) =>
       postPrivacy: formatted.postPrivacy,
       postTags: formatted.postTags,
       postCollaborators: formatted.postCollaborators,
-      stats: { reactions: statsMap.get(p.id.toString()) },
+      stats: {
+        reactions: reactionStatsMap.get(key),
+        comments: commentStatsMap.get(key),
+      },
       created_at: formatted.createdAt,
       updated_at: formatted.updatedAt,
     };
   });
 
   return {
-    metadata: {
-      total_posts: totalPosts,
-      current_page: currentPage,
-      limit: take,
-      total_pages: totalPages,
-    },
     data,
+    metadata: {
+      limit: take,
+      nextCursor, // string id của post cuối cùng, hoặc null nếu hết
+      hasNext, // false → FE không gọi tiếp
+    },
   };
 };
 
