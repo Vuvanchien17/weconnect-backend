@@ -60,6 +60,9 @@ model User {
   // Reaction on post
   postReactions PostReaction[]
 
+  // Comment user đã viết
+  comments Comment[]
+
 }
 
 enum AuthType {
@@ -214,6 +217,7 @@ model Post {
   postTags PostTag[]
   postCollaborators PostCollaborator[]
   postReactions PostReaction[]
+  comments Comment[]
 
   @@index([userId, createdAt])
   @@index([isDeleted])  // choose posts do not delete yet
@@ -355,5 +359,39 @@ model PostReaction {
   createdAt DateTime @default(now())
 
   @@id([postId, userId])
+}
+
+
+// define table Comment
+// Threading 2 cấp: top-level (parentId = null) và reply (parentId trỏ đến top-level).
+// KHÔNG support nested reply (reply trên reply) — service layer enforce auto-flatten.
+// Soft delete: khi user xóa, set isDeleted=true, FE render placeholder "[Đã xóa]".
+model Comment {
+  id BigInt @id @default(autoincrement())
+
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  userId BigInt
+  user User @relation(fields: [userId], references: [id])
+
+  // null = top-level comment. Có giá trị = reply trỏ đến top-level (không nested tiếp).
+  parentId BigInt?
+  parent Comment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies Comment[] @relation("CommentReplies")
+
+  content String @db.Text
+  isEdited Boolean @default(false)
+  isDeleted Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime? @updatedAt
+
+  // Index 1: list top-level comment của 1 post theo thời gian (parentId = null filter)
+  // Index 2: list replies của 1 top-level comment theo thời gian
+  // Index 3: list comment của 1 user (profile page)
+  @@index([postId, parentId, createdAt])
+  @@index([parentId, createdAt])
+  @@index([userId])
 }
 
