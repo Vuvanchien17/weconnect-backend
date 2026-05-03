@@ -74,9 +74,24 @@ prisma/
 - Endpoint chia 2 group: nested (`/posts/:postId/comments`) cho create/list, top-level (`/comments/:id`) cho replies/update/delete
 - Xem chi tiết API ở section [API Reference — Comment](#api-reference--comment-fe-integration-guide) bên dưới
 
+### ✅ Friend System
+
+- **Friend Request** với 4 thao tác: send / accept / reject / cancel
+- **Auto-match**: khi A và B cùng gửi request cho nhau → BE tự accept request cũ thay vì tạo request thừa
+- **Friendship 2 chiều**: lưu cả `(A, B)` và `(B, A)` → query "ai là bạn của X" đơn giản
+- **Block system**: block 1 chiều, transaction tự động unfriend + xóa pending request giữa 2 user
+- **Friend Status API** trả 1 trong 7 state (`self / none / friends / pending_outgoing / pending_incoming / blocked_by_me / blocked_by_them`) — FE dùng để render đúng button
+- **Privacy filter trong News Feed**:
+  - `public` → ai cũng xem
+  - `friends` → owner + bạn bè
+  - `private` → chỉ owner
+  - Post của user trong block list (2 chiều) bị ẩn
+  - Xem detail post không có quyền → 404 (information hiding)
+- **TODO v2**: `friends_except` / `specific_friends` / `custom` hiện đang treat như `friends` — cần thêm bảng phụ để implement chính xác
+- Xem chi tiết API ở section [API Reference — Friend System](#api-reference--friend-system-fe-integration-guide) bên dưới
+
 ### 🔲 Schema-only (chưa có API)
 
-- Friend system: `FriendShip`, `FriendRequest`, `UserBlock` (Prisma)
 - MongoDB: Notification, Conversation, Message (Mongoose)
 
 ## Branch & trạng thái hiện tại
@@ -178,9 +193,440 @@ Authorization: Bearer <accessToken>
 - Khi `metadata.hasNext === false` → đã hết feed, **không gọi tiếp** (`nextCursor` sẽ là `null`)
 - Post mới do user khác đăng giữa các lần scroll **KHÔNG** xuất hiện tự động → muốn show "X bài viết mới ở trên" → cần feature "pull-to-refresh" gọi `?cursor=` (không truyền cursor) lấy lại từ đầu
 
+### Privacy filter — auto-applied ở backend
+
+FE **không cần làm gì** — backend tự lọc:
+- Post `public` → mọi user thấy
+- Post `friends` (và các biến thể) → chỉ owner + bạn bè (Friendship table) thấy
+- Post `private` → chỉ owner thấy
+- Post của user trong block list (2 chiều: mình block hoặc bị block) → ẩn hoàn toàn
+
+Hệ quả phía FE:
+- Cùng 1 endpoint `/posts`, mỗi user thấy feed khác nhau (đã filter sẵn)
+- Số lượng `data` có thể nhỏ hơn `limit` ngay cả khi `hasNext: true` — đó là bình thường (filter ở DB layer, không leak count)
+- `GET /posts/:id` post không có quyền → trả **404** (không 403, không tiết lộ post tồn tại) → FE handle như "post không tồn tại"
+
 ---
 
-## API Reference — Comment (FE Integration Guide)
+## API Reference — Friend System (FE Integration Guide)
+
+> Mọi endpoint đều **yêu cầu xác thực** — header `Authorization: Bearer <accessToken>`.
+>
+> **Base URL**: `http://localhost:5000/api/v1`
+> **BigInt → string**: tất cả `id` trong response là **string**.
+
+### State machine — quan hệ giữa 2 user
+
+```
+                     A và B (lạ)
+                          │
+                ┌─────────┴─────────┐
+                │ A gửi friend request │
+                ▼                     ▲
+      ┌──────────────────┐            │
+      │ pending_outgoing │ ──cancel──┘
+      │  (A → B)         │
+      └────────┬─────────┘
+               │ B accept
+               ▼
+         ┌─────────┐
+         │ friends │ ──unfriend──→ none
+         └────┬────┘
+              │ A block B (từ bất kỳ state nào)
+              ▼
+       ┌──────────────┐
+       │ blocked_by_me│ ──unblock──→ none
+       └──────────────┘
+```
+
+### Friend Status — endpoint quan trọng nhất
+
+```http
+GET /api/v1/users/:userId/friend-status
+```
+
+Trả 1 trong 7 state, FE dùng để render đúng button:
+
+| Status | Mô tả | UI gợi ý |
+|---|---|---|
+| `self` | Đang xem profile của chính mình | Hiện "Edit Profile" thay vì friend button |
+| `none` | Không quan hệ | Button "Add Friend" |
+| `pending_outgoing` | Mình đã gửi, chờ họ xử lý | Button "Cancel Request" + `requestId` (để gọi cancel) |
+| `pending_incoming` | Họ đã gửi, mình chưa xử lý | Button "Confirm" / "Delete" + `requestId` (để accept/reject) |
+| `friends` | Đã là bạn | Button "Friends ▼" (dropdown unfriend/block) + `friendsSince` |
+| `blocked_by_me` | Mình đã block họ | Button "Unblock" |
+| `blocked_by_them` | Họ đã block mình | Hiện "User unavailable" — KHÔNG hiện button friend |
+
+**Response example:**
+
+```json
+// status = friends
+{
+  "message": "Get friend status successfully.",
+  "status": "friends",
+  "friendsSince": "2026-04-15T10:00:00.000Z"
+}
+
+// status = pending_outgoing
+{
+  "message": "Get friend status successfully.",
+  "status": "pending_outgoing",
+  "requestId": "42"
+}
+
+// status = none
+{
+  "message": "Get friend status successfully.",
+  "status": "none"
+}
+```
+
+---
+
+### Response shape — User compact (dùng chung)
+
+```json
+{
+  "id": "7",
+  "userName": "vuvanchien",
+  "displayName": "Vũ Văn Chiến",
+  "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+}
+```
+
+### Response shape — FriendRequest
+
+```json
+{
+  "id": "42",
+  "status": "pending",
+  "sender": { /* user compact */ },
+  "receiver": { /* user compact */ },
+  "createdAt": "2026-04-30T10:00:00.000Z",
+  "respondedAt": null
+}
+```
+
+---
+
+### 1. Gửi lời mời kết bạn
+
+```http
+POST /api/v1/friend-requests
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{
+  "receiverId": 5
+}
+```
+
+**Response 201 — Tạo request mới:**
+```json
+{
+  "message": "Friend request sent successfully.",
+  "type": "request_sent",
+  "request": { /* FriendRequest shape */ }
+}
+```
+
+**Response 201 — Auto-match (B đã gửi cho A trước, A click Add → tự accept):**
+```json
+{
+  "message": "You are now friends!",
+  "type": "auto_matched",
+  "request": { /* FriendRequest accepted */ },
+  "friend": { /* User compact của bên kia */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Tự gửi cho mình | `"Cannot send friend request to yourself."` |
+| 400 | Đã là bạn | `"Already friends."` |
+| 400 | Đã có pending từ mình | `"Friend request already sent."` |
+| 403 | Có block 2 chiều | `"Cannot send friend request — user is blocked."` |
+| 404 | Receiver không tồn tại | `"User not found."` |
+
+**FE pattern:**
+- Phân biệt `type` → render UI khác (toast "Request sent" vs "You are now friends!")
+- Sau request_sent: gọi `getFriendStatus` lại hoặc tự update state thành `pending_outgoing`
+
+---
+
+### 2. Chấp nhận lời mời
+
+```http
+PATCH /api/v1/friend-requests/:id/accept
+```
+
+**Response 200:**
+```json
+{
+  "message": "Friend request accepted.",
+  "request": { /* FriendRequest với status: "accepted" */ },
+  "friend": { /* User compact của sender */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Request đã processed | `"Friend request already processed."` |
+| 403 | Mình không phải receiver | `"You don't have permission to accept this request."` |
+| 404 | Request không tồn tại | `"Friend request not found."` |
+
+---
+
+### 3. Từ chối lời mời
+
+```http
+PATCH /api/v1/friend-requests/:id/reject
+```
+
+**Response 200:** `{ "message": "Friend request rejected." }`
+
+**Errors:** giống endpoint 2.
+
+> Sau reject, sender **CÓ THỂ gửi lại** (status đã rejected, không còn match `pending`).
+
+---
+
+### 4. Hủy lời mời mình đã gửi
+
+```http
+DELETE /api/v1/friend-requests/:id
+```
+
+Khác với reject:
+- **Reject** = receiver từ chối (UPDATE status=rejected, giữ history)
+- **Cancel** = sender hủy lời mời mình đã gửi (DELETE row hoàn toàn)
+
+**Response 200:** `{ "message": "Friend request cancelled." }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Request đã processed | `"Cannot cancel — request already processed."` |
+| 403 | Mình không phải sender | `"You don't have permission to cancel this request."` |
+| 404 | Request không tồn tại | `"Friend request not found."` |
+
+---
+
+### 5. Inbox — lời mời đến mình
+
+```http
+GET /api/v1/friend-requests/inbox?cursor=&limit=10
+```
+
+Cursor pagination, sort `id DESC` (newest first). Chỉ trả request `status=pending`.
+
+**Response 200:**
+```json
+{
+  "message": "Get inbox successfully.",
+  "data": [ /* FriendRequest[] */ ],
+  "metadata": { "limit": 10, "nextCursor": "23", "hasNext": true }
+}
+```
+
+### 6. Outbox — lời mời mình đã gửi
+
+```http
+GET /api/v1/friend-requests/outbox?cursor=&limit=10
+```
+
+Same shape như inbox. Pending only.
+
+---
+
+### 7. List bạn của 1 user
+
+```http
+GET /api/v1/users/:userId/friends?cursor=&limit=10
+```
+
+**`userId`** có thể là chính mình hoặc user khác (FE hiển thị friend list của ai cũng được).
+
+**Response 200:**
+```json
+{
+  "message": "Get friends successfully.",
+  "data": [
+    {
+      "id": "5",
+      "userName": "...",
+      "displayName": "...",
+      "avatar": "...",
+      "friendsSince": "2026-04-01T..."
+    }
+  ],
+  "metadata": { "limit": 10, "nextCursor": "<friendId>", "hasNext": true }
+}
+```
+
+> **`cursor`** ở đây là `friendId` (BigInt string) — không phải `id` autoincrement.
+
+**Errors:** 404 nếu `userId` không tồn tại.
+
+---
+
+### 8. Unfriend
+
+```http
+DELETE /api/v1/friends/:userId
+```
+
+**Response 200:** `{ "message": "Unfriend successfully." }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Tự unfriend chính mình | `"Invalid operation."` |
+| 404 | Không phải bạn | `"You are not friends with this user."` |
+
+> Backend tự xóa cả 2 row Friendship `(A,B)` và `(B,A)` trong transaction — FE chỉ cần gọi 1 lần.
+
+---
+
+### 9. Block user
+
+```http
+POST /api/v1/blocks
+Content-Type: application/json
+```
+
+**Body:** `{ "blockedId": 5 }`
+
+**Response 201:**
+```json
+{
+  "message": "User blocked successfully.",
+  "blocked": { /* User compact */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Tự block | `"Cannot block yourself."` |
+| 400 | Đã block trước đó | `"User is already blocked."` |
+| 404 | User không tồn tại | `"User not found."` |
+
+> **Backend tự cascade**: nếu A và B đang là bạn → unfriend luôn. Nếu có pending request giữa 2 bên → xóa request. FE không cần gọi unfriend riêng trước khi block.
+
+### 10. Unblock
+
+```http
+DELETE /api/v1/blocks/:userId
+```
+
+**Response 200:** `{ "message": "User unblocked successfully." }`
+
+**Errors:** 404 nếu chưa block (`"User is not blocked."`).
+
+> Unblock **KHÔNG khôi phục** Friendship cũ. Cả 2 phải kết bạn lại từ đầu.
+
+### 11. List user mình đã block
+
+```http
+GET /api/v1/blocks?cursor=&limit=10
+```
+
+**Response 200:**
+```json
+{
+  "message": "Get blocks successfully.",
+  "data": [
+    {
+      "id": "5",
+      "userName": "...",
+      "displayName": "...",
+      "avatar": "...",
+      "blockedAt": "..."
+    }
+  ],
+  "metadata": { "limit": 10, "nextCursor": "<blockedId>", "hasNext": true }
+}
+```
+
+---
+
+### Edge cases & business rules cho FE
+
+| Tình huống | Backend xử lý | FE nên làm |
+|---|---|---|
+| User A và B đồng thời click "Add Friend" cho nhau | Auto-match → tạo Friendship luôn | Phân biệt `type: "auto_matched"` để render UI "You are now friends" |
+| User reject xong sender gửi lại | Cho phép — request mới | Bình thường |
+| User unfriend rồi gửi lại request | Cho phép | Bình thường |
+| Block user đang là bạn | Cascade unfriend | Sau block, gọi `getFriendStatus` lại để update state |
+| Block user đang có pending | Xóa request | Bình thường |
+| Xem profile user đã block mình | `friend-status` trả `blocked_by_them` | Hiện "User unavailable" |
+| Spam click "Add" 2 lần | 400 idempotent | Disable button trong 500ms sau click |
+
+---
+
+### Suggested FE state structure (RTK Query)
+
+```js
+// userApi
+getFriendStatus: builder.query({
+  query: (userId) => `/users/${userId}/friend-status`,
+  providesTags: (result, error, userId) => [
+    { type: "FriendStatus", id: userId }
+  ],
+}),
+
+// friendApi
+sendFriendRequest: builder.mutation({
+  query: (receiverId) => ({
+    url: "/friend-requests",
+    method: "POST",
+    body: { receiverId },
+  }),
+  invalidatesTags: (result, error, receiverId) => [
+    { type: "FriendStatus", id: receiverId },
+    { type: "Inbox" },
+    { type: "Outbox" },
+  ],
+}),
+
+acceptFriendRequest: builder.mutation({
+  query: (requestId) => ({
+    url: `/friend-requests/${requestId}/accept`,
+    method: "PATCH",
+  }),
+  invalidatesTags: (result) => [
+    { type: "FriendStatus", id: result?.friend?.id },
+    { type: "Inbox" },
+    { type: "Friends" },
+  ],
+}),
+
+// Tương tự cho reject / cancel / unfriend / block / unblock
+```
+
+**Pattern quan trọng**: mọi mutation thay đổi quan hệ → invalidate tag `FriendStatus` của user kia → component đang render button friend tự refetch và đổi UI.
+
+### Suggested UI flow
+
+```
+1. User A search → list user kết quả → mỗi item gọi getFriendStatus
+2. Render button theo status:
+   - none → "Add Friend" → click sendRequest → status thành pending_outgoing → button "Cancel"
+   - pending_incoming → 2 button "Confirm" / "Delete" với requestId từ status
+   - friends → "Friends ▼" dropdown (Unfriend / Block)
+3. A vào profile B → header có button friend (cùng logic)
+4. A vào /friends/inbox → list FriendRequest → 2 button accept/reject với request.id
+5. A vào /settings/blocks → list block → button "Unblock" cho từng user
+```
+
+---
+
+
 
 > Section này dành cho FE developer. Mọi endpoint dưới đây đều **yêu cầu xác thực** — gắn header `Authorization: Bearer <accessToken>`.
 >

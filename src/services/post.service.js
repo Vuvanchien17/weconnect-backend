@@ -2,6 +2,62 @@ import prisma from "../config/prisma.js";
 import { cloudinary } from "../config/cloudinary.js";
 import { buildReactionStatsMap } from "./reaction.service.js";
 import { buildCommentStatsMap } from "./comment.service.js";
+import { getBlockListIds, getFriendIds } from "./friend.service.js";
+
+// ============ HELPER: Build visibility filter cho post ============
+// Trả về mảng filter để dùng trong AND clause của Prisma where.
+// Logic: user chỉ thấy post nếu
+//   1. Owner KHÔNG nằm trong block list (cả 2 chiều)
+//   2. AND privacy phù hợp:
+//      - public            → ai cũng thấy
+//      - friends + variants → bạn bè HOẶC chính mình
+//      - private           → chỉ chính mình
+//
+// TODO v2: friends_except / specific_friends / custom hiện đang treat như "friends"
+// (cần thêm bảng PostExcludedUser / PostAllowedUser để implement chính xác).
+const buildVisibilityFilters = (currentUserId, friendIds, blockListIds) => {
+  const me = BigInt(currentUserId);
+  const filters = [];
+
+  // 1. Block filter — loại post của user trong block list
+  if (blockListIds.length > 0) {
+    filters.push({ userId: { notIn: blockListIds } });
+  }
+
+  // 2. Privacy filter — 3 nhánh OR
+  filters.push({
+    OR: [
+      // Nhánh 1: post công khai
+      { postPrivacy: { name: "public" } },
+
+      // Nhánh 2: post bạn bè (gồm cả các loại friends_*) — chỉ owner hoặc friend
+      {
+        AND: [
+          {
+            postPrivacy: {
+              name: {
+                in: ["friends", "friends_except", "specific_friends", "custom"],
+              },
+            },
+          },
+          {
+            OR: [
+              { userId: me }, // chính mình
+              { userId: { in: friendIds } }, // bạn bè
+            ],
+          },
+        ],
+      },
+
+      // Nhánh 3: post riêng tư — chỉ owner
+      {
+        AND: [{ postPrivacy: { name: "private" } }, { userId: me }],
+      },
+    ],
+  });
+
+  return filters;
+};
 
 // include structure dùng chung khi trả về post đầy đủ
 const fullPostInclude = {
@@ -191,9 +247,25 @@ export const createFullPostService = async (
 };
 
 // ============ READ ONE ============
+// Áp dụng visibility filter (privacy + block) — nếu không match → trả null
+// (controller sẽ trả 404, KHÔNG tiết lộ post tồn tại nhưng không có quyền xem)
 export const getPostByIdService = async (postId, currentUserId) => {
+  // Get friend + block list của current user
+  const [friendIds, blockListIds] = await Promise.all([
+    getFriendIds(currentUserId),
+    getBlockListIds(currentUserId),
+  ]);
+
+  const visibilityFilters = buildVisibilityFilters(
+    currentUserId,
+    friendIds,
+    blockListIds,
+  );
+
   const post = await prisma.post.findFirst({
-    where: { id: BigInt(postId), isDeleted: false },
+    where: {
+      AND: [{ id: BigInt(postId), isDeleted: false }, ...visibilityFilters],
+    },
     include: fullPostInclude,
   });
 
@@ -227,9 +299,25 @@ export const getPostByIdService = async (postId, currentUserId) => {
 export const getPostsService = async ({ userId, cursor, limit, currentUserId }) => {
   const take = Math.min(Math.max(Number(limit) || 10, 1), 50);
 
+  // Get friend + block list của current user (parallel)
+  const [friendIds, blockListIds] = await Promise.all([
+    getFriendIds(currentUserId),
+    getBlockListIds(currentUserId),
+  ]);
+
+  const visibilityFilters = buildVisibilityFilters(
+    currentUserId,
+    friendIds,
+    blockListIds,
+  );
+
+  // AND combine: base + profile filter (nếu có) + visibility
   const where = {
-    isDeleted: false,
-    ...(userId && { userId: BigInt(userId) }),
+    AND: [
+      { isDeleted: false },
+      ...(userId ? [{ userId: BigInt(userId) }] : []),
+      ...visibilityFilters,
+    ],
   };
 
   const posts = await prisma.post.findMany({

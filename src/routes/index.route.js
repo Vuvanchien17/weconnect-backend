@@ -3,6 +3,11 @@ import authRoute from "./auth.route.js";
 import userRoute from "./user.route.js";
 import postRoute from "./post.route.js";
 import commentRoute from "./comment.route.js";
+import {
+  blockRoute,
+  friendRequestRoute,
+  friendshipRoute,
+} from "./friend.route.js";
 import { protectedRoute } from "../middlewares/auth.middleware.js";
 import { checkBlackList } from "../middlewares/checkBlackList.middleware.js";
 
@@ -19,5 +24,8 @@ rootRouter.use(checkBlackList);
 rootRouter.use("/users", userRoute);
 rootRouter.use("/posts", postRoute);
 rootRouter.use("/comments", commentRoute);
+rootRouter.use("/friend-requests", friendRequestRoute);
+rootRouter.use("/friends", friendshipRoute);
+rootRouter.use("/blocks", blockRoute);
 
 export default rootRouter;

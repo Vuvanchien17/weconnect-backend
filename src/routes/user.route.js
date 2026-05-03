@@ -8,6 +8,7 @@ import {
 import { uploadCloud } from "../config/cloudinary.js";
 import { validate } from "../middlewares/validate.middleware.js";
 import { profileSchema } from "../validations/profile.schema.js";
+import { nestedUserFriendRoute } from "./friend.route.js";
 
 const router = express.Router();
 
@@ -25,5 +26,8 @@ router.put(
 router.post("/infor", fillBaseProfile);
 
 router.get("/search", searchUsers);
+
+// Nested routes — /users/:userId/friends + /users/:userId/friend-status
+router.use("/:userId", nestedUserFriendRoute);
 
 export default router;
