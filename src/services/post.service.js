@@ -260,6 +260,7 @@ export const createFullPostService = async (
         type: "post_tag",
         payload: {
           postId: newPost.id.toString(),
+          postOwnerId: BigInt(userId).toString(),
           preview,
         },
       }).catch((err) => {
@@ -568,6 +569,7 @@ export const updateFullPostService = async (
           type: "post_tag",
           payload: {
             postId: postId.toString(),
+            postOwnerId: BigInt(userId).toString(),
             preview,
           },
         }).catch((err) => {

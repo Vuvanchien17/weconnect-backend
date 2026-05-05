@@ -1072,7 +1072,7 @@ socket.on("notification:new", (payload) => {
 {
   "id": "662d8a1e3f4b5c001a2e3f4b",
   "type": "post_tag",
-  "payload": { "postId": "5", "preview": "Hôm nay đẹp trời..." },
+  "payload": { "postId": "5", "postOwnerId": "7", "preview": "Hôm nay đẹp trời..." },
   "isRead": false,
   "actor": {
     "id": "7",
@@ -1118,9 +1118,11 @@ useEffect(() => {
 |------------------|----------------------------------------|---------------------------------------------------------------------------------|------------------------------------|
 | `friend_request` | Receiver của request                   | `requestId` (string)                                                            | Mở `/friends/inbox` highlight item |
 | `friend_accept`  | Sender (người gửi request ban đầu)     | `requestId` (string)                                                            | Mở profile actor                   |
-| `post_reaction`  | Post owner                             | `postId`, `reactionId`, `reactionKey` (`love`/`like`/...), `reactionIcon`        | Scroll đến post                    |
-| `comment`        | Top-level → post owner; Reply → parent owner | `postId`, `commentId`, `parentId` (null nếu top-level), `content` (truncated 100) | Scroll đến comment                 |
-| `post_tag`       | Mỗi user được tag (create + tag mới khi update) | `postId`, `preview` (text 100 chars từ block đầu, có thể null)                    | Mở post                            |
+| `post_reaction`  | Post owner                             | `postId`, `postOwnerId`, `reactionId`, `reactionKey` (`love`/`like`/...), `reactionIcon` | Mở `/profile/<postOwnerId>` rồi scroll đến post |
+| `comment`        | Top-level → post owner; Reply → parent owner | `postId`, `postOwnerId`, `commentId`, `parentId` (null nếu top-level), `content` (truncated 100) | Mở `/profile/<postOwnerId>` rồi scroll đến comment |
+| `post_tag`       | Mỗi user được tag (create + tag mới khi update) | `postId`, `postOwnerId`, `preview` (text 100 chars từ block đầu, có thể null) | Mở `/profile/<postOwnerId>` rồi scroll đến post |
+
+**`postOwnerId` trong 3 type post-related**: chủ post (BigInt → string). FE dùng để navigate đến `/profile/:postOwnerId` rồi auto-scroll đến `postId` (UX giống Facebook). Trong case `comment` reply, `postOwnerId` có thể KHÁC recipient (recipient là chủ comment cha) — FE vẫn navigate theo `postOwnerId` để vào đúng feed của chủ post.
 
 **Tương lai (chưa implement, có sẵn trong enum):**
 - `comment_reaction`, `post_tag` đã có ✅
@@ -1137,6 +1139,7 @@ useEffect(() => {
   "type": "post_reaction",
   "payload": {
     "postId": "5",
+    "postOwnerId": "9",
     "reactionId": 2,
     "reactionKey": "love",
     "reactionIcon": "❤️"
