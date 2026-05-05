@@ -3,6 +3,7 @@ import authRoute from "./auth.route.js";
 import userRoute from "./user.route.js";
 import postRoute from "./post.route.js";
 import commentRoute from "./comment.route.js";
+import notificationRoute from "./notification.route.js";
 import {
   blockRoute,
   friendRequestRoute,
@@ -27,5 +28,6 @@ rootRouter.use("/comments", commentRoute);
 rootRouter.use("/friend-requests", friendRequestRoute);
 rootRouter.use("/friends", friendshipRoute);
 rootRouter.use("/blocks", blockRoute);
+rootRouter.use("/notifications", notificationRoute);
 
 export default rootRouter;

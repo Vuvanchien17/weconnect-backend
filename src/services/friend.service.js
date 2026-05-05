@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { createNotificationService } from "./notification.service.js";
 
 // ============ HELPERS ============
 
@@ -127,6 +128,18 @@ export const sendFriendRequestService = async (senderId, receiverId) => {
     include: friendRequestInclude,
   });
 
+  // 6. Notification cho receiver (best-effort)
+  try {
+    await createNotificationService({
+      userId: receiver,
+      actorId: sender,
+      type: "friend_request",
+      payload: { requestId: request.id.toString() },
+    });
+  } catch (err) {
+    console.error("[Notification] friend_request failed:", err.message);
+  }
+
   return { type: "request_sent", request: formatFriendRequest(request) };
 };
 
@@ -176,6 +189,18 @@ export const acceptFriendRequestService = async (requestId, currentUserId) => {
       data: { userId: request.receiverId, friendId: request.senderId },
     }),
   ]);
+
+  // Notification cho sender (người gửi request được accept) — best-effort
+  try {
+    await createNotificationService({
+      userId: request.senderId,
+      actorId: request.receiverId,
+      type: "friend_accept",
+      payload: { requestId: reqId.toString() },
+    });
+  } catch (err) {
+    console.error("[Notification] friend_accept failed:", err.message);
+  }
 
   // Trả về user kia (sender từ góc nhìn của người accept)
   return {

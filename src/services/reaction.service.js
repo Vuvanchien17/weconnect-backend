@@ -1,13 +1,14 @@
 import prisma from "../config/prisma.js";
+import { createNotificationService } from "./notification.service.js";
 
 // ============ REACT / UPDATE REACTION ============
 // 1 user chỉ có 1 reaction trên 1 post (PK composite postId+userId).
 // Click emoji khác → update. Bỏ thì gọi removeReactionService (FE tự handle toggle).
 export const reactToPostService = async (postId, userId, reactionId) => {
-  // 1. Check post tồn tại + chưa bị soft delete
+  // 1. Check post tồn tại + chưa bị soft delete (cần thêm userId để noti post owner)
   const post = await prisma.post.findUnique({
     where: { id: BigInt(postId) },
-    select: { id: true, isDeleted: true },
+    select: { id: true, userId: true, isDeleted: true },
   });
   if (!post || post.isDeleted) {
     const err = new Error("Post not found.");
@@ -41,6 +42,24 @@ export const reactToPostService = async (postId, userId, reactionId) => {
     },
     include: { reaction: true },
   });
+
+  // 4. Notification cho post owner (best-effort, không rollback nếu fail)
+  // Self-action filter đã có trong createNotificationService → không cần check ở đây
+  try {
+    await createNotificationService({
+      userId: post.userId,
+      actorId: BigInt(userId),
+      type: "post_reaction",
+      payload: {
+        postId: postId.toString(),
+        reactionId: reaction.id,
+        reactionKey: reaction.keyName,
+        reactionIcon: reaction.icon,
+      },
+    });
+  } catch (err) {
+    console.error("[Notification] post_reaction failed:", err.message);
+  }
 
   return result;
 };

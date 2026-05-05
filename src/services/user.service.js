@@ -88,6 +88,74 @@ export const getMeService = async (userId) => {
   };
 };
 
+// ============ GET PROFILE BY ID (xem profile user khác) ============
+// Khác với getMeService: KHÔNG trả email/phoneNumber/role/status (private fields).
+//
+// Block-aware: nếu giữa current user và target có quan hệ block (cả 2 chiều)
+// → trả null (controller → 404, information hiding) — KHÔNG để lộ user tồn tại.
+//
+// Tự xem profile mình (targetUserId === currentUserId) cũng OK — FE simplify
+// chỉ cần 1 endpoint `/users/:userId/profile` cho mọi case.
+export const getUserProfileByIdService = async (
+  targetUserId,
+  currentUserId,
+) => {
+  const targetIdBig = BigInt(targetUserId);
+  const meBig = BigInt(currentUserId);
+
+  // 1. Check block 2 chiều — chỉ cần 1 row match là ẩn user
+  // UserBlock dùng composite PK [blockerId, blockedId], không có id autoincrement.
+  if (targetIdBig !== meBig) {
+    const block = await prisma.userBlock.findFirst({
+      where: {
+        OR: [
+          { blockerId: meBig, blockedId: targetIdBig },
+          { blockerId: targetIdBig, blockedId: meBig },
+        ],
+      },
+      select: { blockerId: true },
+    });
+    if (block) return null;
+  }
+
+  // 2. Join User + Profile (chỉ public fields)
+  const user = await prisma.user.findFirst({
+    where: { id: targetIdBig, isDeleted: false },
+    select: {
+      id: true,
+      userName: true,
+      createdAt: true,
+      profile: {
+        select: {
+          displayName: true,
+          avatar: true,
+          coverImage: true,
+          gender: true,
+          birthDay: true,
+          bio: true,
+          location: true,
+          website: true,
+        },
+      },
+    },
+  });
+
+  if (!user) return null;
+
+  const { profile, ...userFields } = user;
+  return {
+    ...userFields,
+    displayName: profile?.displayName || user.userName,
+    avatar: profile?.avatar || null,
+    coverImage: profile?.coverImage || null,
+    gender: profile?.gender || null,
+    birthDay: profile?.birthDay || null,
+    bio: profile?.bio || null,
+    location: profile?.location || null,
+    website: profile?.website || null,
+  };
+};
+
 export const searchUsersService = async (keyword, currentUserId) => {
   const users = await prisma.user.findMany({
     where: {

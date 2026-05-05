@@ -3,6 +3,7 @@ import {
   fillBaseProfileService,
   getMeService,
   getProfileByUserId,
+  getUserProfileByIdService,
   searchUsersService,
   updateProfileService,
 } from "../services/user.service.js";
@@ -118,6 +119,28 @@ export const searchUsers = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+// GET /users/:userId/profile — xem profile user khác (hoặc chính mình)
+// Trả 404 nếu: user không tồn tại / đã xóa / có quan hệ block 2 chiều
+export const getUserProfile = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const currentUserId = req.user.id;
+
+    const profile = await getUserProfileByIdService(userId, currentUserId);
+    if (!profile) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    return res.status(200).json({
+      message: "Get user profile successfully.",
+      data: profile,
+    });
+  } catch (error) {
+    console.error("Error getUserProfile:", error);
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };
