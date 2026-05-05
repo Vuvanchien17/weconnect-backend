@@ -46,10 +46,12 @@ prisma/
 
 ### ✅ User
 
-- Xem / cập nhật profile
+- Xem / cập nhật profile (chính mình qua `/users/me`)
+- **Xem profile user khác** qua `GET /users/:userId/profile` — block-aware (block 2 chiều → 404)
 - Fill base profile (onboarding)
-- Tìm kiếm user
+- Tìm kiếm user (`GET /users/search?q=...`, top 10, không pagination — dùng cho dropdown autocomplete)
 - Upload avatar / cover → Cloudinary
+- Xem chi tiết API ở section [API Reference — User Profile](#api-reference--user-profile-fe-integration-guide) bên dưới
 
 ### ✅ Post
 
@@ -90,9 +92,25 @@ prisma/
 - **TODO v2**: `friends_except` / `specific_friends` / `custom` hiện đang treat như `friends` — cần thêm bảng phụ để implement chính xác
 - Xem chi tiết API ở section [API Reference — Friend System](#api-reference--friend-system-fe-integration-guide) bên dưới
 
+### ✅ Notification
+
+- **Storage**: MongoDB (Mongoose) — write-heavy, không quan hệ phức tạp → tách khỏi MySQL
+- **Cross-DB lookup**: notification lưu `actorId` (BigInt MySQL), khi list trả về thì bulk-fetch `User+Profile` từ MySQL → tránh N+1 (1 Mongo query + 1 MySQL query / page)
+- **Realtime**: Socket.io — connection auth qua `handshake.auth.token` (JWT), socket join room `user:{userId}`, BE emit `notification:new` khi tạo noti
+- **Best-effort emit**: nếu Mongo persist OK nhưng Socket fail → KHÔNG rollback action gốc (vd react/comment/tag vẫn thành công)
+- **Self-action filter** trong `createNotificationService`: skip nếu `actorId === userId` (vd react post của chính mình → không noti)
+- **Trigger points** đã wire (5 type):
+  - `friend_request`: send friend request → noti receiver
+  - `friend_accept`: accept request → noti sender
+  - `post_reaction`: react post → noti post owner
+  - `comment`: top-level → noti post owner; reply → noti immediate parent owner (lưu `parentUserId` TRƯỚC khi auto-flatten parentId)
+  - `post_tag`: create post → noti mọi tagged user; update post → chỉ noti **tag mới** (diff với tag cũ)
+- **TODO**: `collab_invite` (cần thêm enum value), `comment_reaction`, `message`
+- Xem chi tiết API ở section [API Reference — Notification](#api-reference--notification-fe-integration-guide) bên dưới
+
 ### 🔲 Schema-only (chưa có API)
 
-- MongoDB: Notification, Conversation, Message (Mongoose)
+- MongoDB: Conversation, Message (Mongoose)
 
 ## Branch & trạng thái hiện tại
 
@@ -999,3 +1017,460 @@ getReplies: builder.query({
   },
 }),
 ```
+
+---
+
+## API Reference — Notification (FE Integration Guide)
+
+> Mọi REST endpoint **yêu cầu xác thực** — header `Authorization: Bearer <accessToken>`.
+>
+> **Base URL**: `http://localhost:5000/api/v1`
+> **Realtime**: Socket.io connect tới cùng host (vd `http://localhost:5000`), auth token gửi qua `auth.token` trong handshake.
+> **Notification ID**: là Mongo `ObjectId` → string 24 ký tự hex (vd `"662d8a1e3f4b5c001a2e3f4b"`). KHÁC với BigInt id của MySQL entities.
+
+### Realtime — Socket.io contract
+
+#### 1. Connection + Auth
+
+```js
+// FE — connect 1 lần khi user đăng nhập, persist socket trong app shell
+import { io } from "socket.io-client";
+
+const socket = io("http://localhost:5000", {
+  auth: { token: accessToken }, // gửi JWT access token
+  withCredentials: true,
+  autoConnect: true,
+});
+
+socket.on("connect", () => {
+  console.log("[Socket] connected", socket.id);
+});
+
+socket.on("connect_error", (err) => {
+  // err.message = "UNAUTHORIZED: No token provided." | "UNAUTHORIZED: Invalid token."
+  console.error("[Socket] auth failed:", err.message);
+});
+```
+
+**Behavior backend:**
+- BE verify JWT từ `handshake.auth.token` ngay khi connect. Sai → reject.
+- Sau khi connect OK, socket tự `join("user:{userId}")` — KHÔNG cần FE emit gì.
+- Khi access token refresh → FE phải `socket.disconnect()` rồi connect lại với token mới (BE không hot-swap token).
+
+#### 2. Listen event `notification:new`
+
+```js
+socket.on("notification:new", (payload) => {
+  // payload = formatted notification (shape giống response của GET /notifications)
+  // → invalidate badge count + prepend vào list nếu đang mở dropdown
+});
+```
+
+**Payload shape** (giống item trong `GET /notifications`):
+
+```json
+{
+  "id": "662d8a1e3f4b5c001a2e3f4b",
+  "type": "post_tag",
+  "payload": { "postId": "5", "preview": "Hôm nay đẹp trời..." },
+  "isRead": false,
+  "actor": {
+    "id": "7",
+    "userName": "vuvanchien",
+    "displayName": "Vũ Văn Chiến",
+    "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+  },
+  "createdAt": "2026-05-04T10:00:00.000Z"
+}
+```
+
+#### 3. Recommended FE pattern (RTK Query + Socket listener)
+
+```js
+// App shell — mount socket 1 lần, listen → dispatch invalidate
+useEffect(() => {
+  if (!accessToken) return;
+  const socket = io(SOCKET_URL, { auth: { token: accessToken } });
+
+  socket.on("notification:new", (noti) => {
+    // 1. Invalidate badge
+    dispatch(notificationApi.util.invalidateTags(["UnreadCount"]));
+
+    // 2. Optimistic prepend vào list (nếu user đang mở dropdown noti)
+    dispatch(
+      notificationApi.util.updateQueryData("getNotifications", undefined, (draft) => {
+        draft.data.unshift(noti);
+      }),
+    );
+
+    // 3. (optional) toast "X reacted to your post"
+  });
+
+  return () => socket.disconnect();
+}, [accessToken]);
+```
+
+---
+
+### Notification types — payload reference
+
+| Type             | Recipient                              | Payload fields                                                                  | Action FE click vào noti           |
+|------------------|----------------------------------------|---------------------------------------------------------------------------------|------------------------------------|
+| `friend_request` | Receiver của request                   | `requestId` (string)                                                            | Mở `/friends/inbox` highlight item |
+| `friend_accept`  | Sender (người gửi request ban đầu)     | `requestId` (string)                                                            | Mở profile actor                   |
+| `post_reaction`  | Post owner                             | `postId`, `reactionId`, `reactionKey` (`love`/`like`/...), `reactionIcon`        | Scroll đến post                    |
+| `comment`        | Top-level → post owner; Reply → parent owner | `postId`, `commentId`, `parentId` (null nếu top-level), `content` (truncated 100) | Scroll đến comment                 |
+| `post_tag`       | Mỗi user được tag (create + tag mới khi update) | `postId`, `preview` (text 100 chars từ block đầu, có thể null)                    | Mở post                            |
+
+**Tương lai (chưa implement, có sẵn trong enum):**
+- `comment_reaction`, `post_tag` đã có ✅
+- `message`, `group_invite` chưa wire trigger
+- `collab_invite` chưa có trong enum — sẽ thêm khi implement collaborator invite flow
+
+---
+
+### Response shape — Notification cơ bản
+
+```json
+{
+  "id": "662d8a1e3f4b5c001a2e3f4b",
+  "type": "post_reaction",
+  "payload": {
+    "postId": "5",
+    "reactionId": 2,
+    "reactionKey": "love",
+    "reactionIcon": "❤️"
+  },
+  "isRead": false,
+  "actor": {
+    "id": "7",
+    "userName": "vuvanchien",
+    "displayName": "Vũ Văn Chiến",
+    "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+  },
+  "createdAt": "2026-05-04T10:00:00.000Z"
+}
+```
+
+- `id`: Mongo ObjectId (string)
+- `type`: 1 trong các value của enum (xem bảng trên)
+- `payload`: object linh động — shape khác nhau theo `type` → FE switch theo `type` để render đúng
+- `actor`: user gây ra action (đã kèm avatar/displayName, FE render ngay không cần fetch thêm)
+
+---
+
+### 1. List notifications (cursor pagination)
+
+```http
+GET /api/v1/notifications?cursor=<lastObjectId>&limit=10&unreadOnly=false
+```
+
+**Query params:**
+| Param        | Default | Range/Type | Mô tả                                                            |
+|--------------|---------|------------|------------------------------------------------------------------|
+| `cursor`     | —       | ObjectId   | `id` notification cuối đã load. Lần đầu bỏ trống.                |
+| `limit`      | `10`    | `1-50`     | Số noti / lần load                                               |
+| `unreadOnly` | `false` | bool       | `true` → chỉ trả noti chưa đọc (cho tab "Unread" trên dropdown)  |
+
+**Response 200:**
+```json
+{
+  "message": "Get notifications successfully.",
+  "data": [ /* Notification[] */ ],
+  "metadata": { "limit": 10, "nextCursor": "662d...", "hasNext": true }
+}
+```
+
+**Lưu ý FE:**
+- Sort `_id DESC` ≈ `createdAt DESC` (Mongo ObjectId có timestamp embed) → noti mới nhất ở đầu
+- Lần đầu mở dropdown: `?limit=10` (không cursor)
+- Scroll xuống: `?cursor=<nextCursor>&limit=10`
+- `hasNext: false` → ngừng gọi
+
+---
+
+### 2. Đếm số noti chưa đọc (cho badge)
+
+```http
+GET /api/v1/notifications/unread-count
+```
+
+**Response 200:**
+```json
+{ "message": "Get unread count successfully.", "count": 3 }
+```
+
+**Lưu ý FE:**
+- Gọi 1 lần khi mount app shell → set badge `🔔 3`
+- Sau đó update qua **Socket event** (`notification:new` → +1) thay vì polling
+- Khi user click "Mark all as read" → reset về 0 (optimistic) + gọi API real
+- Khi user click 1 noti chưa đọc → −1 (optimistic) + gọi API real
+
+---
+
+### 3. Mark 1 notification là đã đọc
+
+```http
+PATCH /api/v1/notifications/:id/read
+```
+
+`:id` là Mongo ObjectId.
+
+**Response 200:** `{ "message": "Notification marked as read." }`
+
+**Errors:**
+| Code | Khi nào                              | Message                                                  |
+|------|--------------------------------------|----------------------------------------------------------|
+| 403  | Noti không phải của user             | `"You don't have permission to access this notification."` |
+| 404  | ID không hợp lệ / noti không tồn tại | `"Notification not found."`                              |
+
+**FE pattern:**
+- Khi user click vào item noti → gọi `PATCH /:id/read` → đồng thời redirect đến URL phù hợp với `type` (xem bảng "Action FE click vào noti" ở trên)
+- Optimistic: set `isRead: true` trong cache trước khi API về
+
+---
+
+### 4. Mark ALL as read
+
+```http
+PATCH /api/v1/notifications/read-all
+```
+
+**Response 200:**
+```json
+{
+  "message": "All notifications marked as read.",
+  "modifiedCount": 5
+}
+```
+
+`modifiedCount`: số noti vừa được mark — FE dùng để hiện toast "5 notifications marked as read" (optional).
+
+---
+
+### 5. Delete notification
+
+```http
+DELETE /api/v1/notifications/:id
+```
+
+**Response 200:** `{ "message": "Notification deleted successfully." }`
+
+**Errors:** giống endpoint 3 (403/404).
+
+> Hard delete — không có "trash". User xóa là mất luôn.
+
+---
+
+### Edge cases & business rules cho FE
+
+| Tình huống | Backend xử lý | FE nên làm |
+|---|---|---|
+| User self-action (vd react post của mình) | `createNotificationService` skip → không tạo noti | — (không nhận event) |
+| Mongo persist OK nhưng Socket emit fail | Action gốc vẫn thành công, noti có trong DB | User refresh thì thấy noti — không cần xử lý |
+| User refresh access token | Socket cũ vẫn dùng token cũ | Disconnect + reconnect socket với token mới |
+| User mở 2 tab | Cả 2 tab đều join `user:{userId}` → cả 2 nhận event | Đồng bộ cache qua RTK Query (mỗi tab tự update) |
+| User click noti tới post đã bị xóa | API `GET /posts/:id` trả 404 | Toast "Post no longer exists" + xóa noti khỏi list |
+| Spam reaction (react → unreact → react) | Mỗi lần react sẽ trigger noti mới | BE chưa dedupe — TODO v2 thêm "noti gộp" (vd "X và 5 người khác reacted") |
+| Comment trên reply (parentId là 1 reply) | BE auto-flatten parentId, nhưng noti vẫn về **immediate parent owner** (lưu `parentUserId` trước khi flatten) | Bình thường — đúng intent user |
+
+---
+
+### Suggested FE state structure (RTK Query)
+
+```js
+// notificationApi
+getNotifications: builder.query({
+  query: ({ cursor, limit = 10, unreadOnly = false }) => ({
+    url: "/notifications",
+    params: { ...(cursor && { cursor }), limit, unreadOnly },
+  }),
+  providesTags: ["Notifications"],
+  serializeQueryArgs: ({ endpointName, queryArgs }) =>
+    `${endpointName}-${queryArgs.unreadOnly}`,
+  merge: (currentCache, newItems, { arg }) => {
+    if (!arg?.cursor) return newItems;
+    currentCache.data.push(...newItems.data);
+    currentCache.metadata = newItems.metadata;
+  },
+  forceRefetch: ({ currentArg, previousArg }) =>
+    currentArg?.cursor !== previousArg?.cursor,
+}),
+
+getUnreadCount: builder.query({
+  query: () => "/notifications/unread-count",
+  providesTags: ["UnreadCount"],
+}),
+
+markAsRead: builder.mutation({
+  query: (id) => ({ url: `/notifications/${id}/read`, method: "PATCH" }),
+  // optimistic: update cache trực tiếp, không cần invalidate full list
+  async onQueryStarted(id, { dispatch, queryFulfilled }) {
+    const patch = dispatch(
+      notificationApi.util.updateQueryData("getNotifications", undefined, (draft) => {
+        const target = draft.data.find((n) => n.id === id);
+        if (target && !target.isRead) target.isRead = true;
+      }),
+    );
+    try { await queryFulfilled; }
+    catch { patch.undo(); }
+  },
+  invalidatesTags: ["UnreadCount"],
+}),
+
+markAllAsRead: builder.mutation({
+  query: () => ({ url: "/notifications/read-all", method: "PATCH" }),
+  invalidatesTags: ["Notifications", "UnreadCount"],
+}),
+
+deleteNotification: builder.mutation({
+  query: (id) => ({ url: `/notifications/${id}`, method: "DELETE" }),
+  invalidatesTags: ["Notifications", "UnreadCount"],
+}),
+```
+
+### Suggested UI flow
+
+```
+1. App shell mount → connect Socket.io với accessToken
+2. Header bell icon → query getUnreadCount → render badge
+3. Click bell → mở dropdown → query getNotifications (limit=10)
+4. Dropdown có 2 tab "All" / "Unread" → tab "Unread" gọi với unreadOnly=true
+5. Click 1 noti:
+   - Mark as read (optimistic) + decrement badge
+   - Navigate theo type (xem bảng "Action FE click vào noti")
+6. Click "Mark all as read" → reset badge về 0
+7. Khi nhận `notification:new` qua Socket:
+   - Tăng badge +1
+   - Prepend vào list (nếu dropdown đang mở)
+   - (optional) Toast với actor.displayName + type
+```
+
+---
+
+## API Reference — User Profile (FE Integration Guide)
+
+> Mọi endpoint **yêu cầu xác thực** — header `Authorization: Bearer <accessToken>`.
+>
+> **Base URL**: `http://localhost:5000/api/v1`
+> **BigInt → string**: `id` trả về dạng string.
+
+### 1. Search user (autocomplete)
+
+```http
+GET /api/v1/users/search?q=<keyword>
+```
+
+**Query:**
+| Param | Required | Mô tả |
+|---|---|---|
+| `q` | ✅ | Keyword (tìm theo `userName` HOẶC `displayName`, contains) |
+
+**Response 200:**
+```json
+{
+  "message": "Users found",
+  "listUsers": [
+    {
+      "userId": "5",
+      "userName": "vuvanchien",
+      "displayName": "Vũ Văn Chiến",
+      "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+    }
+  ]
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Thiếu `q` hoặc rỗng | `"Please enter username!"` |
+
+**Lưu ý FE:**
+- Hardcode top 10 result, không có pagination → phù hợp **dropdown autocomplete**, KHÔNG phù hợp dedicated search results page (sẽ thêm cursor sau nếu cần)
+- KHÔNG trả về current user (BE đã filter)
+- Empty result vẫn 200 với `listUsers: []` + message `"User not found"` (không phải error)
+- **Pattern khuyến nghị**: debounce 300ms → call API → render dropdown
+
+---
+
+### 2. Xem profile user khác (hoặc chính mình)
+
+```http
+GET /api/v1/users/:userId/profile
+```
+
+**Response 200:**
+```json
+{
+  "message": "Get user profile successfully.",
+  "data": {
+    "id": "5",
+    "userName": "vuvanchien",
+    "displayName": "Vũ Văn Chiến",
+    "avatar": "https://res.cloudinary.com/.../avatar.jpg",
+    "coverImage": "https://res.cloudinary.com/.../cover.jpg",
+    "gender": "male",
+    "birthDay": "2002-01-15T00:00:00.000Z",
+    "bio": "Hello world",
+    "location": "Hanoi, Vietnam",
+    "website": "https://example.com",
+    "createdAt": "2025-01-01T..."
+  }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 404 | User không tồn tại / đã xóa | `"User not found."` |
+| 404 | Có quan hệ block 2 chiều (mình block hoặc bị block) | `"User not found."` |
+
+**Lưu ý FE:**
+- KHÔNG trả `email`, `phoneNumber`, `role`, `status` (private fields chỉ xuất hiện ở `/users/me`)
+- **Block-aware = 404** (information hiding) → FE handle như user không tồn tại, KHÔNG hiển thị thông báo "Bạn đã bị block" để tránh leak info
+- Endpoint này dùng được cho **CHÍNH MÌNH** (`userId === currentUserId`) — FE simplify chỉ cần 1 endpoint cho mọi profile page (nhưng nếu cần email/role thì vẫn dùng `/me`)
+- Pattern: 2 query song song trên ProfilePage:
+  - `GET /users/:userId/profile` → render header (avatar, cover, name, bio...)
+  - `GET /users/:userId/friend-status` → render button friend
+  - Tách riêng để invalidate cache độc lập (mutation friend chỉ cần invalidate `FriendStatus` tag, profile data không refetch)
+
+---
+
+### Suggested ProfilePage flow (RTK Query)
+
+```js
+// userApi
+getUserProfile: builder.query({
+  query: (userId) => `/users/${userId}/profile`,
+  providesTags: (result, error, userId) => [
+    { type: "UserProfile", id: userId }
+  ],
+}),
+
+searchUsers: builder.query({
+  query: (q) => `/users/search?q=${encodeURIComponent(q)}`,
+}),
+
+// ProfilePage component
+function ProfilePage() {
+  const { userId } = useParams();
+  const { data: profile, isLoading } = useGetUserProfileQuery(userId);
+  const { data: status } = useGetFriendStatusQuery(userId);
+
+  if (isLoading) return <Spinner />;
+  if (!profile) return <NotFound />; // 404 từ API
+
+  return (
+    <>
+      <CoverImage src={profile.coverImage} />
+      <Avatar src={profile.avatar} />
+      <h1>{profile.displayName}</h1>
+      <FriendButton status={status} userId={userId} />
+      <Bio text={profile.bio} />
+      <UserPosts userId={userId} /> {/* gọi GET /posts?userId=... */}
+    </>
+  );
+}
+```
+
