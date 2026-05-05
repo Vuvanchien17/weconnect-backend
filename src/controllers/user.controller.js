@@ -6,6 +6,7 @@ import {
   getUserProfileByIdService,
   searchUsersService,
   updateProfileService,
+  getProfileByPhoneNumber,
 } from "../services/user.service.js";
 
 export const authMe = async (req, res) => {
@@ -38,7 +39,7 @@ export const updateProfile = async (req, res) => {
     if (userData?.phoneNumber) {
       const userExist = await getProfileByPhoneNumber(userData?.phoneNumber);
 
-      if (userExist && userExist.userId !== user.userId) {
+      if (userExist && userExist.userId !== user.id) {
         return res.status(409).json({
           message: "The phone number has already been used.",
         });
