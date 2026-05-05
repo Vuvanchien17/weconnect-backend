@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { createNotificationService } from "./notification.service.js";
 
 // ============ HELPERS ============
 
@@ -50,10 +51,10 @@ export const createCommentService = async (
   content,
   parentId,
 ) => {
-  // 1. Check post
+  // 1. Check post (cần userId để noti post owner cho top-level comment)
   const post = await prisma.post.findUnique({
     where: { id: BigInt(postId) },
-    select: { id: true, isDeleted: true },
+    select: { id: true, userId: true, isDeleted: true },
   });
   if (!post || post.isDeleted) {
     const err = new Error("Post not found.");
@@ -62,12 +63,16 @@ export const createCommentService = async (
   }
 
   // 2. Resolve parentId (auto-flatten reply-on-reply)
+  // Lưu parentUserId để noti — là người mà current user thực sự click "Reply" trên
+  // (theo FE intent), KHÔNG phải grandparent owner sau khi BE flatten.
   let resolvedParentId = null;
+  let parentUserId = null;
   if (parentId) {
     const parent = await prisma.comment.findUnique({
       where: { id: BigInt(parentId) },
       select: {
         id: true,
+        userId: true,
         postId: true,
         parentId: true,
         isDeleted: true,
@@ -86,6 +91,7 @@ export const createCommentService = async (
     }
     // Auto-flatten: parent là reply → lấy top-level grandparent
     resolvedParentId = parent.parentId !== null ? parent.parentId : parent.id;
+    parentUserId = parent.userId;
   }
 
   // 3. Insert comment + include user info để FE render ngay
@@ -98,6 +104,31 @@ export const createCommentService = async (
     },
     include: commentInclude,
   });
+
+  // 4. Notification target:
+  // - top-level comment → noti cho post owner
+  // - reply → noti cho immediate parent owner (người user click "Reply" trên)
+  // Self-action filter có sẵn trong createNotificationService.
+  const recipientUserId = parentUserId !== null ? parentUserId : post.userId;
+  // Truncate content cho noti gọn (FE click vào xem full)
+  const truncatedContent =
+    content.length > 100 ? content.substring(0, 100) + "..." : content;
+
+  try {
+    await createNotificationService({
+      userId: recipientUserId,
+      actorId: BigInt(userId),
+      type: "comment",
+      payload: {
+        postId: postId.toString(),
+        commentId: comment.id.toString(),
+        parentId: resolvedParentId ? resolvedParentId.toString() : null,
+        content: truncatedContent,
+      },
+    });
+  } catch (err) {
+    console.error("[Notification] comment failed:", err.message);
+  }
 
   return formatComment(comment);
 };

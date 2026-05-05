@@ -3,6 +3,7 @@ import { cloudinary } from "../config/cloudinary.js";
 import { buildReactionStatsMap } from "./reaction.service.js";
 import { buildCommentStatsMap } from "./comment.service.js";
 import { getBlockListIds, getFriendIds } from "./friend.service.js";
+import { createNotificationService } from "./notification.service.js";
 
 // ============ HELPER: Build visibility filter cho post ============
 // Trả về mảng filter để dùng trong AND clause của Prisma where.
@@ -243,6 +244,30 @@ export const createFullPostService = async (
     };
   });
 
+  // Notification cho user được tag — best-effort, fire sau khi transaction commit.
+  // Self-tag đã bị filter trước insert nên không cần check lại.
+  // Lấy preview text từ block đầu tiên (nếu có) để FE hiển thị noti có ngữ cảnh.
+  const firstTextBlock = newPost.postBlocks.find((b) => b.type === "text");
+  const rawText = firstTextBlock?.content?.text || "";
+  const preview =
+    rawText.length > 100 ? rawText.substring(0, 100) + "..." : rawText || null;
+
+  await Promise.all(
+    newPost.postTags.map((tag) =>
+      createNotificationService({
+        userId: tag.userId,
+        actorId: BigInt(userId),
+        type: "post_tag",
+        payload: {
+          postId: newPost.id.toString(),
+          preview,
+        },
+      }).catch((err) => {
+        console.error("[Notification] post_tag failed:", err.message);
+      }),
+    ),
+  );
+
   return newPost;
 };
 
@@ -389,9 +414,13 @@ export const updateFullPostService = async (
   collabUserIds,
 ) => {
   // 1. Check tồn tại + ownership
+  // include postTags để diff với tag mới sau update → chỉ noti user MỚI được tag.
   const existing = await prisma.post.findUnique({
     where: { id: BigInt(postId) },
-    include: { postBlocks: true },
+    include: {
+      postBlocks: true,
+      postTags: { select: { taggedUserId: true } },
+    },
   });
 
   if (!existing || existing.isDeleted) {
@@ -512,6 +541,40 @@ export const updateFullPostService = async (
     } catch (err) {
       console.error("Cloudinary cleanup failed for", publicId, err.message);
     }
+  }
+
+  // 4. Notification cho user MỚI được tag (diff với tag cũ).
+  // Tag cũ KHÔNG noti lại — họ đã nhận noti khi post được tạo / được tag lần trước.
+  const oldTaggedIds = new Set(
+    existing.postTags.map((t) => t.taggedUserId.toString()),
+  );
+  const newOnlyTags = updated.postTags.filter(
+    (t) => !oldTaggedIds.has(t.taggedUser.id.toString()),
+  );
+
+  if (newOnlyTags.length > 0) {
+    const firstTextBlock = updated.postBlocks.find((b) => b.type === "text");
+    const rawText = firstTextBlock?.content?.text || "";
+    const preview =
+      rawText.length > 100
+        ? rawText.substring(0, 100) + "..."
+        : rawText || null;
+
+    await Promise.all(
+      newOnlyTags.map((tag) =>
+        createNotificationService({
+          userId: tag.taggedUser.id,
+          actorId: BigInt(userId),
+          type: "post_tag",
+          payload: {
+            postId: postId.toString(),
+            preview,
+          },
+        }).catch((err) => {
+          console.error("[Notification] post_tag failed:", err.message);
+        }),
+      ),
+    );
   }
 
   return formatPost(updated);
