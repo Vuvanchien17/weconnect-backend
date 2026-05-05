@@ -121,6 +121,7 @@ export const createCommentService = async (
       type: "comment",
       payload: {
         postId: postId.toString(),
+        postOwnerId: post.userId.toString(),
         commentId: comment.id.toString(),
         parentId: resolvedParentId ? resolvedParentId.toString() : null,
         content: truncatedContent,

@@ -52,6 +52,7 @@ export const reactToPostService = async (postId, userId, reactionId) => {
       type: "post_reaction",
       payload: {
         postId: postId.toString(),
+        postOwnerId: post.userId.toString(),
         reactionId: reaction.id,
         reactionKey: reaction.keyName,
         reactionIcon: reaction.icon,

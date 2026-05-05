@@ -403,8 +403,12 @@ export const getFriendsService = async ({ userId, cursor, limit }) => {
 };
 
 // ============ UNFRIEND ============
-// Transaction xóa 2 row Friendship — đảm bảo không có trạng thái "A là bạn B
-// nhưng B không là bạn A".
+// Transaction xóa 2 row Friendship + cleanup FriendRequest cũ.
+//
+// FriendRequest có @@unique([senderId, receiverId]) — sau accept, row vẫn tồn tại
+// với status=accepted. Nếu chỉ xóa Friendship mà giữ FriendRequest, lần sau gửi
+// kết bạn lại sẽ fail unique constraint. → deleteMany 2 chiều, mọi status để
+// khôi phục state "stranger" hoàn toàn.
 export const unfriendService = async (currentUserId, otherUserId) => {
   const me = BigInt(currentUserId);
   const other = BigInt(otherUserId);
@@ -425,13 +429,21 @@ export const unfriendService = async (currentUserId, otherUserId) => {
     throw err;
   }
 
-  // Transaction xóa cả 2 row
+  // Transaction: xóa 2 row Friendship + clean FriendRequest 2 chiều (mọi status)
   await prisma.$transaction([
     prisma.friendship.delete({
       where: { userId_friendId: { userId: me, friendId: other } },
     }),
     prisma.friendship.delete({
       where: { userId_friendId: { userId: other, friendId: me } },
+    }),
+    prisma.friendRequest.deleteMany({
+      where: {
+        OR: [
+          { senderId: me, receiverId: other },
+          { senderId: other, receiverId: me },
+        ],
+      },
     }),
   ]);
 };
