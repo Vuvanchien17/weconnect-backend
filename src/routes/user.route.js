@@ -2,6 +2,7 @@ import express from "express";
 import {
   authMe,
   fillBaseProfile,
+  getUserProfile,
   searchUsers,
   updateProfile,
 } from "../controllers/user.controller.js";
@@ -26,6 +27,10 @@ router.put(
 router.post("/infor", fillBaseProfile);
 
 router.get("/search", searchUsers);
+
+// Xem profile user khác (block-aware) — đặt TRƯỚC nestedUserFriendRoute
+// để Express match /:userId/profile trước khi rơi vào sub-router.
+router.get("/:userId/profile", getUserProfile);
 
 // Nested routes — /users/:userId/friends + /users/:userId/friend-status
 router.use("/:userId", nestedUserFriendRoute);
