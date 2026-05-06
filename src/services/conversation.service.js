@@ -3,6 +3,7 @@ import Conversation from "../models/mongoDB/conversation.model.js";
 import Message from "../models/mongoDB/message.model.js";
 import prisma from "../config/prisma.js";
 import { emitToUser } from "../config/socket.js";
+import { cloudinary } from "../config/cloudinary.js";
 
 // ============ HELPERS ============
 
@@ -130,7 +131,9 @@ const formatMessage = (msg, sender, replyToMsg, replyToSender) => ({
     : null,
   reactions: (msg.reactions || []).map((r) => ({
     userId: r.userId.toString(),
-    emoji: r.emoji,
+    reactionId: r.reactionId,
+    keyName: r.keyName,
+    icon: r.icon,
     createdAt: r.createdAt,
   })),
   sender: sender ? formatUser(sender) : null,
@@ -614,4 +617,363 @@ export const markAsReadService = async ({ conversationId, userId }) => {
   }
 
   return { lastReadMessageId: latestMessage._id.toString() };
+};
+
+// ============================================================
+// STEP 2b — MESSAGE ACTIONS
+// edit / recall / remove for me / toggle reaction
+// ============================================================
+
+// ============ HELPER: load message + verify membership ============
+// Dùng chung cho 4 service action — load message, conversation, check participant.
+// Trả { message (mongoose doc), conv (mongoose doc), myParticipant }.
+// Nếu user KHÔNG phải participant → throw 404 (information hiding).
+const loadMessageForAction = async (messageId, userId) => {
+  if (!mongoose.Types.ObjectId.isValid(messageId)) {
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const message = await Message.findById(messageId);
+  if (!message) {
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(message.conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const myParticipant = conv.participants.find(
+    (p) => p.userId.toString() === userId.toString(),
+  );
+  if (!myParticipant) {
+    // User không phải participant → 404 thay vì 403 để tránh leak info
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  return { message, conv, myParticipant };
+};
+
+// ============ EDIT MESSAGE ============
+// Chỉ owner sửa được. Chỉ áp dụng cho type="text" (image/file/system disallow).
+// Set isEdited=true + editedAt=now → FE render "(đã chỉnh sửa)".
+//
+// Nếu message này là lastMessage của conversation → cập nhật preview text.
+// Emit "message:edited" cho all active participants.
+export const editMessageService = async ({ messageId, userId, content }) => {
+  const me = BigInt(userId);
+  const { message, conv, myParticipant } = await loadMessageForAction(
+    messageId,
+    me,
+  );
+
+  // Reject nếu đã recall — coi như không tồn tại
+  if (message.isDeleted) {
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  // Chỉ owner mới sửa được
+  if (message.senderId.toString() !== me.toString()) {
+    const err = new Error("You don't have permission to edit this message.");
+    err.status = 403;
+    throw err;
+  }
+
+  // User đã rời group → không cho action
+  if (myParticipant.leftAt) {
+    const err = new Error("You are not a member of this conversation.");
+    err.status = 403;
+    throw err;
+  }
+
+  // Chỉ text message edit được
+  if (message.type !== "text") {
+    const err = new Error("Cannot edit non-text message.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Update message
+  message.content = content;
+  message.isEdited = true;
+  message.editedAt = new Date();
+  await message.save();
+
+  // Nếu message này là lastMessage cache của conversation → update preview luôn
+  if (
+    conv.lastMessage?.messageId?.toString() === message._id.toString()
+  ) {
+    await Conversation.updateOne(
+      { _id: conv._id },
+      { $set: { "lastMessage.content": truncate(content, 100) } },
+    );
+  }
+
+  // Bulk-fetch sender + replyTo info để format response giống listMessages
+  const userIdsToFetch = [me];
+  let replyToMsg = null;
+  if (message.replyTo) {
+    replyToMsg = await Message.findById(message.replyTo).lean();
+    if (replyToMsg) userIdsToFetch.push(replyToMsg.senderId);
+  }
+  const userMap = await buildUserMap(userIdsToFetch);
+
+  const formatted = formatMessage(
+    message.toObject(),
+    userMap.get(me.toString()),
+    replyToMsg,
+    replyToMsg ? userMap.get(replyToMsg.senderId.toString()) : null,
+  );
+
+  // Emit "message:edited" cho all active participants (gồm cả sender — multi-tab sync)
+  const allActiveIds = conv.participants
+    .filter((p) => !p.leftAt)
+    .map((p) => p.userId);
+  for (const uid of allActiveIds) {
+    emitToUser(uid, "message:edited", {
+      conversationId: conv._id.toString(),
+      message: formatted,
+    });
+  }
+
+  return formatted;
+};
+
+// ============ RECALL MESSAGE (delete for everyone) ============
+// Chỉ owner thu hồi được. Set isDeleted=true → FE render "Tin nhắn đã thu hồi".
+//
+// Cleanup Cloudinary attachment files (best-effort — không rollback action gốc).
+// Nếu message là lastMessage → update preview thành "Tin nhắn đã thu hồi".
+//
+// Note: KHÔNG xóa hard — giữ doc trong DB cho audit/history.
+// FE muốn xem replyTo trỏ về message đã recall vẫn được, hiển thị "(đã thu hồi)".
+export const recallMessageService = async ({ messageId, userId }) => {
+  const me = BigInt(userId);
+  const { message, conv, myParticipant } = await loadMessageForAction(
+    messageId,
+    me,
+  );
+
+  if (message.isDeleted) {
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  if (message.senderId.toString() !== me.toString()) {
+    const err = new Error("You don't have permission to recall this message.");
+    err.status = 403;
+    throw err;
+  }
+
+  if (myParticipant.leftAt) {
+    const err = new Error("You are not a member of this conversation.");
+    err.status = 403;
+    throw err;
+  }
+
+  // System message không recall được
+  if (message.type === "system") {
+    const err = new Error("Cannot recall system message.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Mark deleted (giữ content/attachments trong DB cho audit)
+  message.isDeleted = true;
+  message.deletedAt = new Date();
+  await message.save();
+
+  // Cleanup Cloudinary — destroy mọi attachment file (best-effort)
+  for (const att of message.attachments || []) {
+    if (att.publicId) {
+      try {
+        await cloudinary.uploader.destroy(att.publicId);
+      } catch (err) {
+        console.error(
+          "[Cloudinary] destroy failed for",
+          att.publicId,
+          err.message,
+        );
+      }
+    }
+  }
+
+  // Nếu là lastMessage → update preview
+  if (
+    conv.lastMessage?.messageId?.toString() === message._id.toString()
+  ) {
+    await Conversation.updateOne(
+      { _id: conv._id },
+      { $set: { "lastMessage.content": "Tin nhắn đã thu hồi" } },
+    );
+  }
+
+  // Emit "message:recalled" cho all active participants
+  const allActiveIds = conv.participants
+    .filter((p) => !p.leftAt)
+    .map((p) => p.userId);
+  for (const uid of allActiveIds) {
+    emitToUser(uid, "message:recalled", {
+      conversationId: conv._id.toString(),
+      messageId: message._id.toString(),
+    });
+  }
+
+  return {
+    id: message._id.toString(),
+    isDeleted: true,
+    deletedAt: message.deletedAt,
+  };
+};
+
+// ============ REMOVE FOR ME (delete chỉ phía 1 user) ============
+// User là PARTICIPANT (không cần là sender) → có quyền remove for me bất kỳ message.
+// Chỉ ảnh hưởng phía user này — message vẫn tồn tại với người khác.
+//
+// $addToSet idempotent → gọi nhiều lần OK.
+// Emit "message:removed-for-me" CHỈ cho user vừa remove (multi-tab sync).
+export const removeMessageForMeService = async ({ messageId, userId }) => {
+  const me = BigInt(userId);
+  const { message } = await loadMessageForAction(messageId, me);
+
+  await Message.updateOne(
+    { _id: message._id },
+    { $addToSet: { deletedFor: me } },
+  );
+
+  // Emit chỉ về self (multi-tab sync — tab khác của me cũng remove khỏi UI)
+  emitToUser(me, "message:removed-for-me", {
+    conversationId: message.conversationId.toString(),
+    messageId: message._id.toString(),
+  });
+
+  return {
+    id: message._id.toString(),
+    removed: true,
+  };
+};
+
+// ============ TOGGLE REACTION (FB-like) ============
+// 1 user 1 reaction / message. Logic:
+//   - Có reaction cũ và reactionId giống → REMOVE (toggle off)
+//   - Có reaction cũ và reactionId khác → REPLACE (đổi)
+//   - Không có → ADD
+//
+// reactionId reference ReactionMaster (MySQL) — validate tồn tại trước khi save.
+// Denormalize keyName + icon vào Message.reactions[] để FE render không cần lookup.
+//
+// Emit "message:reaction:updated" cho all active participants với reactions mới.
+export const toggleMessageReactionService = async ({
+  messageId,
+  userId,
+  reactionId,
+}) => {
+  const me = BigInt(userId);
+  const { message, conv, myParticipant } = await loadMessageForAction(
+    messageId,
+    me,
+  );
+
+  if (message.isDeleted) {
+    const err = new Error("Message not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  if (myParticipant.leftAt) {
+    const err = new Error("You are not a member of this conversation.");
+    err.status = 403;
+    throw err;
+  }
+
+  if (message.type === "system") {
+    const err = new Error("Cannot react to system message.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Validate reactionId trong ReactionMaster
+  const master = await prisma.reactionMaster.findUnique({
+    where: { id: Number(reactionId) },
+  });
+  if (!master) {
+    const err = new Error("Invalid reaction.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Find existing reaction của user
+  const existing = message.reactions.find(
+    (r) => r.userId.toString() === me.toString(),
+  );
+
+  let action;
+  if (existing && existing.reactionId === master.id) {
+    // Toggle off — cùng reaction click 2 lần
+    message.reactions = message.reactions.filter(
+      (r) => r.userId.toString() !== me.toString(),
+    );
+    action = "removed";
+  } else if (existing) {
+    // Replace — đổi reaction
+    message.reactions = message.reactions.filter(
+      (r) => r.userId.toString() !== me.toString(),
+    );
+    message.reactions.push({
+      userId: me,
+      reactionId: master.id,
+      keyName: master.keyName,
+      icon: master.icon,
+      createdAt: new Date(),
+    });
+    action = "replaced";
+  } else {
+    // Add new
+    message.reactions.push({
+      userId: me,
+      reactionId: master.id,
+      keyName: master.keyName,
+      icon: master.icon,
+      createdAt: new Date(),
+    });
+    action = "added";
+  }
+  await message.save();
+
+  const reactionsFormatted = message.reactions.map((r) => ({
+    userId: r.userId.toString(),
+    reactionId: r.reactionId,
+    keyName: r.keyName,
+    icon: r.icon,
+    createdAt: r.createdAt,
+  }));
+
+  // Emit "message:reaction:updated" cho all active participants
+  const allActiveIds = conv.participants
+    .filter((p) => !p.leftAt)
+    .map((p) => p.userId);
+  for (const uid of allActiveIds) {
+    emitToUser(uid, "message:reaction:updated", {
+      conversationId: message.conversationId.toString(),
+      messageId: message._id.toString(),
+      reactions: reactionsFormatted,
+    });
+  }
+
+  return {
+    messageId: message._id.toString(),
+    action, // "added" | "replaced" | "removed"
+    reactions: reactionsFormatted,
+  };
 };
