@@ -33,3 +33,23 @@ export const sendMessageSchema = z.object({
     )
     .optional(),
 });
+
+// PUT /messages/:id — body { content }
+// Edit chỉ áp dụng cho text message. content KHÔNG được rỗng (muốn xóa thì recall).
+export const editMessageSchema = z.object({
+  content: z
+    .string()
+    .trim()
+    .min(1, "Content required.")
+    .max(5000, "Message too long (max 5000 chars)."),
+});
+
+// POST /messages/:id/reactions — body { reactionId }
+// reactionId reference đến ReactionMaster.id (1-7) trong MySQL.
+// Service layer validate id tồn tại + lấy keyName/icon để denormalize vào Message.
+export const reactMessageSchema = z.object({
+  reactionId: z.coerce
+    .number()
+    .int()
+    .positive("Invalid reactionId."),
+});

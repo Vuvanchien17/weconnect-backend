@@ -108,7 +108,7 @@ prisma/
 - **TODO**: `collab_invite` (cần thêm enum value), `comment_reaction`, `message`
 - Xem chi tiết API ở section [API Reference — Notification](#api-reference--notification-fe-integration-guide) bên dưới
 
-### ✅ Chat — Step 2a (Direct 1-1 core)
+### ✅ Chat — Step 2a (Direct 1-1 core) + Step 2b (Message actions)
 
 - **Storage**: MongoDB (Mongoose). 2 collection chính: `Conversation`, `Message`
 - **Cross-DB lookup**: bulk-fetch User+Profile từ MySQL (giống pattern Notification) — chống N+1 khi list conversations + messages
@@ -119,10 +119,16 @@ prisma/
 - **Multi-tab/device sync**: Socket emit `message:new` cho **TẤT CẢ active participants** (gồm cả sender) — pattern chuẩn của Slack/Messenger
 - **Hide conversation** (FB feature): `Conversation.deletedFor[]` soft-hide phía 1 user; gửi message mới auto un-hide cho mọi người
 - **Remove for me** (FB feature): `Message.deletedFor[]` ẩn message phía 1 user, người khác vẫn thấy
-- **Socket events** đã wire:
+- **Edit message**: chỉ owner, chỉ áp dụng `type="text"` (image/file/system disallow), set `isEdited=true` + `editedAt`. Nếu là `lastMessage` của conversation → cập nhật preview
+- **Recall message** (FB "Unsend for everyone"): chỉ owner, set `isDeleted=true` + cleanup Cloudinary attachments (best-effort). `lastMessage` preview thành "Tin nhắn đã thu hồi". KHÔNG hard-delete để giữ audit + replyTo references
+- **Reaction**: reference `ReactionMaster` (MySQL) — 7 reactions cố định (`like/love/care/haha/wow/sad/angry`). Denormalize `keyName` + `icon` vào Message → FE render trực tiếp không cần lookup. 1 user 1 reaction / message; toggle/replace logic
+- **Socket events** đã wire (6 events):
   - `message:new`: emit khi gửi message (gồm cả sender)
   - `message:read`: emit khi mark as read → other participants thấy "Đã xem"
-- **Pending Step 2b**: edit/recall message, react message, remove for me actions
+  - `message:edited`: emit khi edit thành công, payload kèm full message updated
+  - `message:recalled`: emit khi recall, FE re-render với "Tin nhắn đã thu hồi"
+  - `message:removed-for-me`: emit **chỉ về self** (multi-tab sync) khi remove for me
+  - `message:reaction:updated`: emit reactions array mới sau toggle
 - **Pending Step 2c**: group chat (member roles, add/remove, system messages)
 - Xem chi tiết API ở section [API Reference — Chat](#api-reference--chat-fe-integration-guide) bên dưới
 
@@ -1507,9 +1513,13 @@ function ProfilePage() {
 >   - `conversationId` / `messageId` / `lastReadMessageId` / `replyTo.id`: Mongo ObjectId — string 24 hex chars
 >   - `userId` / `senderId` / `peer.id`: BigInt MySQL → string
 
-### Status Step 2a — Direct chat 1-1
+### Status — Direct chat 1-1 (2a) + Message actions (2b)
 
-Hiện tại **chỉ support direct chat 1-1**. Group chat + message actions (edit/recall/react/remove-for-me) sẽ ở Step 2b/2c.
+Đã có:
+- **Step 2a**: createOrGet direct conversation, list conversations, list messages, send message, mark as read
+- **Step 2b**: edit message, recall (delete for everyone), remove for me, toggle reaction (FB-like)
+
+Pending **Step 2c**: group chat (create group, add/remove members, member roles, group avatar/name, system messages).
 
 ---
 
@@ -1578,6 +1588,72 @@ socket.on("message:read", ({ conversationId, userId, lastReadMessageId }) => {
 
 > Event này KHÔNG emit cho user vừa mark (chỉ cho người khác).
 
+#### Listen `message:edited`
+
+```js
+socket.on("message:edited", ({ conversationId, message }) => {
+  // Replace message trong state theo message.id
+  // Render "(đã chỉnh sửa)" cạnh timestamp khi message.isEdited=true
+});
+```
+
+**Payload shape:** `{ conversationId, message: <full Message shape giống message:new> }`
+
+> Emit cho **TẤT CẢ active participants** gồm cả sender (multi-tab sync).
+
+#### Listen `message:recalled`
+
+```js
+socket.on("message:recalled", ({ conversationId, messageId }) => {
+  // Tìm message theo id trong state, set isDeleted=true (hoặc refetch list)
+  // Render "Tin nhắn đã thu hồi" thay cho content/attachments
+});
+```
+
+**Payload shape:** `{ conversationId, messageId }` (không kèm full message — FE tự update flag)
+
+> Emit cho **TẤT CẢ active participants** gồm cả sender.
+
+#### Listen `message:removed-for-me`
+
+```js
+socket.on("message:removed-for-me", ({ conversationId, messageId }) => {
+  // Remove message khỏi UI của me (multi-tab sync)
+});
+```
+
+**Payload shape:** `{ conversationId, messageId }`
+
+> Emit **CHỈ cho user vừa remove** (KHÔNG cho người khác — họ vẫn thấy message bình thường).
+
+#### Listen `message:reaction:updated`
+
+```js
+socket.on("message:reaction:updated", ({ conversationId, messageId, reactions }) => {
+  // Replace `reactions` array của message tương ứng
+  // FE render cluster icon (vd ❤️ 😂 with count)
+});
+```
+
+**Payload shape:**
+```json
+{
+  "conversationId": "662e8a1e3f4b5c001a2e3f4b",
+  "messageId": "662f9b2e4c5d6f001b3f4c5d",
+  "reactions": [
+    {
+      "userId": "8",
+      "reactionId": 2,
+      "keyName": "love",
+      "icon": "❤️",
+      "createdAt": "..."
+    }
+  ]
+}
+```
+
+> Emit cho **TẤT CẢ active participants**.
+
 ---
 
 ### Response shape — Conversation cơ bản
@@ -1633,7 +1709,13 @@ socket.on("message:read", ({ conversationId, userId, lastReadMessageId }) => {
     "sender": { "id": "8", "userName": "...", "displayName": "Hoa", "avatar": "..." }
   },
   "reactions": [
-    { "userId": "8", "emoji": "❤️", "createdAt": "..." }
+    {
+      "userId": "8",
+      "reactionId": 2,
+      "keyName": "love",
+      "icon": "❤️",
+      "createdAt": "..."
+    }
   ],
   "sender": {
     "id": "7",
@@ -1843,6 +1925,179 @@ Mark mọi message trong conversation là đã đọc → reset `unreadCount = 0
 
 ---
 
+### 6. Edit message
+
+```http
+PUT /api/v1/messages/:id
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{ "content": "Nội dung sửa lại" }
+```
+
+**Permission**: chỉ **owner** (sender) sửa được.
+
+**Response 200:**
+```json
+{
+  "message": "Message edited.",
+  "data": { /* full Message shape, isEdited=true, editedAt set */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | content rỗng / > 5000 chars (Zod) | Validation error |
+| 400 | message.type !== "text" (image/file/system) | `"Cannot edit non-text message."` |
+| 403 | Không phải owner | `"You don't have permission to edit this message."` |
+| 403 | User đã rời group (Step 2c) | `"You are not a member of this conversation."` |
+| 404 | Message không tồn tại / đã recall / không phải participant | `"Message not found."` |
+
+**Lưu ý FE:**
+- Chỉ **text** message edit được — image/file/system reject 400
+- Sau response, BE đã emit `message:edited` Socket → tab khác auto update
+- Nếu message này là `lastMessage` của conversation → BE tự update `Conversation.lastMessage.content` preview
+- KHÔNG cho clear sạch content qua edit (`min: 1` ở Zod) — muốn xóa tin nhắn thì recall
+
+---
+
+### 7. Recall message (Unsend for everyone)
+
+```http
+DELETE /api/v1/messages/:id
+```
+
+**Permission**: chỉ **owner** thu hồi được.
+
+**Response 200:**
+```json
+{
+  "message": "Message recalled.",
+  "id": "662f9b2e4c5d6f001b3f4c5d",
+  "isDeleted": true,
+  "deletedAt": "2026-05-06T11:00:00.000Z"
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | type === "system" | `"Cannot recall system message."` |
+| 403 | Không phải owner | `"You don't have permission to recall this message."` |
+| 404 | Đã recall trước đó / không tồn tại / không phải participant | `"Message not found."` |
+
+**Behavior backend:**
+- Set `isDeleted=true` + `deletedAt=now` (KHÔNG hard-delete để giữ audit + replyTo references)
+- Cleanup Cloudinary attachments (best-effort — không rollback nếu fail)
+- Nếu là `lastMessage` của conversation → preview thành `"Tin nhắn đã thu hồi"`
+- Emit `message:recalled` cho all active participants
+
+**Lưu ý FE:**
+- Sau API call success, hoặc nhận socket `message:recalled` → FE set `isDeleted=true` cho message tương ứng → render "Tin nhắn đã thu hồi"
+- Message bị recall vẫn còn trong list (FE không filter) — FE chỉ thay đổi UI render
+- Reply tới message bị recall vẫn hiển thị, FE check `replyTo.isDeleted` để render "(tin nhắn gốc đã bị thu hồi)"
+- KHÔNG có time limit hiện tại — owner thu hồi anytime
+
+---
+
+### 8. Remove for me
+
+```http
+DELETE /api/v1/messages/:id/for-me
+```
+
+**Permission**: bất kỳ **participant** (không cần là sender). Khác với recall, action này chỉ ẩn phía mình.
+
+**Response 200:**
+```json
+{
+  "message": "Message removed for you.",
+  "id": "662f9b2e4c5d6f001b3f4c5d",
+  "removed": true
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 404 | Message không tồn tại / không phải participant | `"Message not found."` |
+
+**Behavior backend:**
+- `$addToSet` userId vào `Message.deletedFor[]` — idempotent
+- Emit `message:removed-for-me` **CHỈ về self** (multi-tab sync) — KHÔNG ảnh hưởng người khác
+
+**Lưu ý FE:**
+- Chỉ cần optimistic remove khỏi list của me — message vẫn ở đó với người khác
+- Multi-tab: tab khác của me cũng nhận event và remove khỏi UI → sync tự động
+- List API tự filter `deletedFor: { $ne: me }` → reload page cũng không thấy
+
+---
+
+### 9. Toggle reaction (FB-like)
+
+```http
+POST /api/v1/messages/:id/reactions
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{ "reactionId": 2 }
+```
+
+`reactionId` là `id` trong `ReactionMaster` (1-7) — giống pattern post reaction. 7 loại: `like (1), love (2), care (3), haha (4), wow (5), sad (6), angry (7)` (kiểm tra DB seed cho chính xác).
+
+**Permission**: bất kỳ **participant** (kể cả tự react message của mình — giống FB).
+
+**Response 200:**
+```json
+{
+  "message": "Reaction updated.",
+  "messageId": "662f9b2e4c5d6f001b3f4c5d",
+  "action": "added",
+  "reactions": [
+    {
+      "userId": "7",
+      "reactionId": 2,
+      "keyName": "love",
+      "icon": "❤️",
+      "createdAt": "2026-05-06T..."
+    }
+  ]
+}
+```
+
+**`action` field:**
+| Value | Khi nào |
+|---|---|
+| `"added"` | User chưa react message này → thêm mới |
+| `"replaced"` | User đã react với reactionId khác → đổi sang reactionId mới |
+| `"removed"` | User click lại cùng reactionId → toggle off |
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | reactionId không tồn tại trong ReactionMaster | `"Invalid reaction."` |
+| 400 | reactionId không phải number / negative (Zod) | Validation error |
+| 400 | message.type === "system" | `"Cannot react to system message."` |
+| 404 | Message không tồn tại / đã recall / không phải participant | `"Message not found."` |
+
+**Behavior backend:**
+- 1 user 1 reaction / message — service filter array khi đổi
+- Denormalize `keyName` + `icon` từ ReactionMaster vào `Message.reactions[]` → FE render trực tiếp không cần lookup master
+- Emit `message:reaction:updated` cho all active participants với `reactions` array mới (có cả icon)
+
+**Lưu ý FE:**
+- 1 endpoint duy nhất xử lý toggle/replace/add — FE không cần phân biệt
+- Click cùng emoji 2 lần = remove (toggle UX phổ biến)
+- Click emoji khác = thay thế (1 user chỉ có 1 reaction trên message)
+- FE cần load `ReactionMaster` 1 lần (qua endpoint riêng nếu có, hoặc hardcode 7 reactions ở config) để render reaction picker; sau đó `reactions[]` trong Message đã có sẵn `icon` để render bubble
+
+---
+
 ### Edge cases & business rules cho FE
 
 | Tình huống | Backend xử lý | FE nên làm |
@@ -1854,7 +2109,14 @@ Mark mọi message trong conversation là đã đọc → reset `unreadCount = 0
 | Mark-as-read khi không có message nào | Trả `lastReadMessageId: null` (không lỗi) | Chỉ update UI nếu cần |
 | Send message tới conversation user vừa bị xóa khỏi group (2c) | `myParticipant.leftAt` → 403 | Reload conversation list (BE đã đẩy member ra) |
 | User tag/mention trong message | Chưa support — content là plain text | TODO v2 |
-| Reaction trên message | Schema có `reactions[]` nhưng API ở Step 2b | Chờ 2b |
+| Edit message image/file | 400 — chỉ cho edit text | Disable button "Edit" trên message non-text |
+| Recall message có attachments | BE auto destroy Cloudinary file (best-effort) | Refresh hoặc trust socket event update UI |
+| Recall message là `lastMessage` của conversation | BE auto update `lastMessage.content = "Tin nhắn đã thu hồi"` | Conversation list preview tự cập nhật khi nhận `message:recalled` (refetch hoặc patch state) |
+| Reply tới message bị recall | `replyTo.isDeleted = true` trong response, content KHÔNG ẩn (giữ context) | Render preview "(tin nhắn gốc đã bị thu hồi)" theo flag isDeleted |
+| Multi-tab: edit/recall ở tab A | Cả 2 tab nhận `message:edited` / `message:recalled` (gồm cả sender) | Replace message theo id |
+| Multi-tab: remove for me ở tab A | Tab B của me nhận `message:removed-for-me` | Remove khỏi UI; tab khác user vẫn thấy message bình thường |
+| User toggle reaction nhanh liên tục | Mỗi lần emit socket → có thể spam events | Debounce reaction button click 200-300ms ở FE |
+| Reaction trên message của chính mình | Cho phép (giống FB) | Render bình thường |
 
 ---
 
@@ -1929,13 +2191,67 @@ markAsRead: builder.mutation({
     catch { patch.undo(); }
   },
 }),
+
+// ===== Step 2b — Message actions =====
+
+editMessage: builder.mutation({
+  query: ({ messageId, content }) => ({
+    url: `/messages/${messageId}`,
+    method: "PUT",
+    body: { content },
+  }),
+  // KHÔNG cần invalidate — Socket "message:edited" tự update mọi tab
+}),
+
+recallMessage: builder.mutation({
+  query: (messageId) => ({
+    url: `/messages/${messageId}`,
+    method: "DELETE",
+  }),
+  // KHÔNG cần invalidate — Socket "message:recalled" tự update
+}),
+
+removeMessageForMe: builder.mutation({
+  query: (messageId) => ({
+    url: `/messages/${messageId}/for-me`,
+    method: "DELETE",
+  }),
+  // Optimistic remove khỏi getMessages cache
+  async onQueryStarted(messageId, { dispatch, queryFulfilled, getState }) {
+    // Tìm message trong cache để biết conversationId
+    const allCaches = chatApi.util.selectInvalidatedBy(getState(), [
+      { type: "Messages" },
+    ]);
+    // Patch tất cả getMessages cache có chứa messageId này
+    const patches = allCaches.map(({ originalArgs }) =>
+      dispatch(
+        chatApi.util.updateQueryData("getMessages", originalArgs, (draft) => {
+          draft.data = draft.data.filter((m) => m.id !== messageId);
+        }),
+      ),
+    );
+    try { await queryFulfilled; }
+    catch { patches.forEach((p) => p.undo()); }
+  },
+}),
+
+toggleReaction: builder.mutation({
+  query: ({ messageId, reactionId }) => ({
+    url: `/messages/${messageId}/reactions`,
+    method: "POST",
+    body: { reactionId },
+  }),
+  // KHÔNG cần invalidate — Socket "message:reaction:updated" tự update
+}),
 ```
 
 ### Suggested UI flow
 
 ```
 1. App shell mount → Socket đã connect (từ Notification setup)
-   → listen "message:new" + "message:read", patch RTK cache thủ công
+   → listen ALL chat events: message:new, message:read, message:edited,
+     message:recalled, message:removed-for-me, message:reaction:updated
+   → patch RTK cache (getMessages + getConversations) thủ công
 
 2. Sidebar conversation list:
    - Query getConversations → render với badge unreadCount
