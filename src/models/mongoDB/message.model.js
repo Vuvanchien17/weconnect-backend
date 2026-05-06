@@ -22,12 +22,17 @@ const attachmentSchema = new mongoose.Schema(
   { _id: false },
 );
 
-// Reaction trên message — FB Messenger-style (1 user 1 reaction).
-// Service layer enforce uniqueness (filter array khi user đổi emoji).
+// Reaction trên message — reference 7 reaction trong ReactionMaster (MySQL).
+// 1 user 1 reaction / message — service enforce qua filter array khi đổi.
+//
+// Denormalize `keyName` + `icon` từ master vào doc → read không cần JOIN ngược.
+// Master stable (7 fixed reactions, hiếm khi đổi) nên acceptable trade-off.
 const reactionSchema = new mongoose.Schema(
   {
     userId: { type: BigInt, required: true },
-    emoji: { type: String, required: true }, // unicode emoji (vd "❤️", "😂")
+    reactionId: { type: Number, required: true }, // ref ReactionMaster.id (MySQL)
+    keyName: { type: String, required: true }, // denormalized — vd "love", "haha"
+    icon: { type: String, required: true }, // denormalized — vd "❤️"
     createdAt: { type: Date, default: Date.now },
   },
   { _id: false },
