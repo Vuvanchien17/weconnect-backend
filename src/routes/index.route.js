@@ -5,6 +5,7 @@ import postRoute from "./post.route.js";
 import commentRoute from "./comment.route.js";
 import notificationRoute from "./notification.route.js";
 import conversationRoute from "./conversation.route.js";
+import messageRoute from "./message.route.js";
 import {
   blockRoute,
   friendRequestRoute,
@@ -31,5 +32,6 @@ rootRouter.use("/friends", friendshipRoute);
 rootRouter.use("/blocks", blockRoute);
 rootRouter.use("/notifications", notificationRoute);
 rootRouter.use("/conversations", conversationRoute);
+rootRouter.use("/messages", messageRoute);
 
 export default rootRouter;
