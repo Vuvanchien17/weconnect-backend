@@ -108,9 +108,27 @@ prisma/
 - **TODO**: `collab_invite` (cần thêm enum value), `comment_reaction`, `message`
 - Xem chi tiết API ở section [API Reference — Notification](#api-reference--notification-fe-integration-guide) bên dưới
 
+### ✅ Chat — Step 2a (Direct 1-1 core)
+
+- **Storage**: MongoDB (Mongoose). 2 collection chính: `Conversation`, `Message`
+- **Cross-DB lookup**: bulk-fetch User+Profile từ MySQL (giống pattern Notification) — chống N+1 khi list conversations + messages
+- **Atomic createOrGet direct chat**: dùng `directKey` (sorted "minId:maxId") + unique partial index → race-safe khi 2 user click "Message" cùng lúc
+- **Block-aware**: nếu A/B có quan hệ block 2 chiều → 403, KHÔNG cho mở chat
+- **Information hiding**: user không phải participant của conversation → 404 (giống pattern post detail)
+- **Read receipts**: `participants[].lastReadMessageId` là ground truth; `unreadCounts: Map<userIdString, count>` cache cho badge nhanh
+- **Multi-tab/device sync**: Socket emit `message:new` cho **TẤT CẢ active participants** (gồm cả sender) — pattern chuẩn của Slack/Messenger
+- **Hide conversation** (FB feature): `Conversation.deletedFor[]` soft-hide phía 1 user; gửi message mới auto un-hide cho mọi người
+- **Remove for me** (FB feature): `Message.deletedFor[]` ẩn message phía 1 user, người khác vẫn thấy
+- **Socket events** đã wire:
+  - `message:new`: emit khi gửi message (gồm cả sender)
+  - `message:read`: emit khi mark as read → other participants thấy "Đã xem"
+- **Pending Step 2b**: edit/recall message, react message, remove for me actions
+- **Pending Step 2c**: group chat (member roles, add/remove, system messages)
+- Xem chi tiết API ở section [API Reference — Chat](#api-reference--chat-fe-integration-guide) bên dưới
+
 ### 🔲 Schema-only (chưa có API)
 
-- MongoDB: Conversation, Message (Mongoose)
+- (Tất cả schema MongoDB đã có API)
 
 ## Branch & trạng thái hiện tại
 
@@ -1475,5 +1493,468 @@ function ProfilePage() {
     </>
   );
 }
+```
+
+---
+
+## API Reference — Chat (FE Integration Guide)
+
+> Mọi REST endpoint **yêu cầu xác thực** — header `Authorization: Bearer <accessToken>`.
+>
+> **Base URL**: `http://localhost:5000/api/v1`
+> **Realtime**: dùng cùng Socket.io instance với Notification (xem [section Notification](#api-reference--notification-fe-integration-guide) cho connection setup).
+> **ID format**:
+>   - `conversationId` / `messageId` / `lastReadMessageId` / `replyTo.id`: Mongo ObjectId — string 24 hex chars
+>   - `userId` / `senderId` / `peer.id`: BigInt MySQL → string
+
+### Status Step 2a — Direct chat 1-1
+
+Hiện tại **chỉ support direct chat 1-1**. Group chat + message actions (edit/recall/react/remove-for-me) sẽ ở Step 2b/2c.
+
+---
+
+### Realtime — Socket.io events
+
+> Socket connection đã thiết lập từ Notification — KHÔNG cần connect lại.
+
+#### Listen `message:new`
+
+```js
+socket.on("message:new", ({ conversationId, message }) => {
+  // 1. Nếu user đang mở conversation này → append message vào danh sách + auto mark-as-read
+  // 2. Nếu KHÔNG mở → tăng unreadCount của conversation đó +1, update lastMessage preview
+  // 3. Nếu sender là chính mình (multi-tab sync) → dedupe by message.id rồi render
+});
+```
+
+**Payload shape:**
+```json
+{
+  "conversationId": "662e8a1e3f4b5c001a2e3f4b",
+  "message": {
+    "id": "662f9b2e4c5d6f001b3f4c5d",
+    "conversationId": "662e8a1e3f4b5c001a2e3f4b",
+    "type": "text",
+    "content": "Hello!",
+    "attachments": [],
+    "replyTo": null,
+    "reactions": [],
+    "sender": {
+      "id": "7",
+      "userName": "vuvanchien",
+      "displayName": "Vũ Văn Chiến",
+      "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+    },
+    "isEdited": false,
+    "isDeleted": false,
+    "systemMeta": null,
+    "createdAt": "2026-05-06T10:00:00.000Z",
+    "updatedAt": "2026-05-06T10:00:00.000Z"
+  }
+}
+```
+
+**Lưu ý quan trọng:**
+- BE emit cho **TẤT CẢ active participants gồm cả sender** → multi-tab/device sync. FE cần dedupe by `message.id` nếu vừa optimistic add từ POST response.
+- Sender info có sẵn trong payload — FE không cần fetch thêm.
+
+#### Listen `message:read`
+
+```js
+socket.on("message:read", ({ conversationId, userId, lastReadMessageId }) => {
+  // userId = người vừa mark as read (KHÁC current user)
+  // → Update UI "Đã xem" cho mọi message có _id <= lastReadMessageId
+});
+```
+
+**Payload shape:**
+```json
+{
+  "conversationId": "662e8a1e3f4b5c001a2e3f4b",
+  "userId": "8",
+  "lastReadMessageId": "662f9b2e4c5d6f001b3f4c5d"
+}
+```
+
+> Event này KHÔNG emit cho user vừa mark (chỉ cho người khác).
+
+---
+
+### Response shape — Conversation cơ bản
+
+```json
+{
+  "id": "662e8a1e3f4b5c001a2e3f4b",
+  "type": "direct",
+  "peer": {
+    "id": "8",
+    "userName": "hoanguyen",
+    "displayName": "Hoa Nguyễn",
+    "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+  },
+  "group": null,
+  "lastMessage": {
+    "id": "662f9b2e4c5d6f001b3f4c5d",
+    "type": "text",
+    "content": "Hello!",
+    "senderId": "7",
+    "createdAt": "2026-05-06T10:00:00.000Z"
+  },
+  "lastMessageAt": "2026-05-06T10:00:00.000Z",
+  "unreadCount": 3,
+  "isMuted": false,
+  "lastReadMessageId": "662f9a1d3b2c1e001a2e3f4a",
+  "createdAt": "2026-05-01T...",
+  "updatedAt": "2026-05-06T10:00:00.000Z"
+}
+```
+
+**FE notes:**
+- `peer` chỉ có cho `type: "direct"` (luôn là user kia, không phải mình) → render avatar + name của họ
+- `peer: null` cho group → render `group.name` + `group.avatar`
+- `lastMessage.content` đã truncate 100 chars + thêm icon cho image/file (vd `"🖼️ 3 ảnh"`, `"📎 report.pdf"`)
+- `unreadCount`: badge cho conversation
+- `isMuted`: nếu `mutedUntil > now` → ẩn notification badge nhưng vẫn count
+
+### Response shape — Message cơ bản
+
+```json
+{
+  "id": "662f9b2e4c5d6f001b3f4c5d",
+  "conversationId": "662e8a1e3f4b5c001a2e3f4b",
+  "type": "text",
+  "content": "Reply lại nè",
+  "attachments": [],
+  "replyTo": {
+    "id": "662f9a1d3b2c1e001a2e3f4a",
+    "type": "text",
+    "content": "Tin nhắn gốc",
+    "isDeleted": false,
+    "sender": { "id": "8", "userName": "...", "displayName": "Hoa", "avatar": "..." }
+  },
+  "reactions": [
+    { "userId": "8", "emoji": "❤️", "createdAt": "..." }
+  ],
+  "sender": {
+    "id": "7",
+    "userName": "vuvanchien",
+    "displayName": "Vũ Văn Chiến",
+    "avatar": "https://res.cloudinary.com/.../avatar.jpg"
+  },
+  "isEdited": false,
+  "editedAt": null,
+  "isDeleted": false,
+  "systemMeta": null,
+  "createdAt": "2026-05-06T10:00:00.000Z",
+  "updatedAt": "2026-05-06T10:00:00.000Z"
+}
+```
+
+**Cho message với attachments:**
+```json
+{
+  "type": "image",
+  "content": "Ảnh chụp hôm qua",
+  "attachments": [
+    {
+      "type": "image",
+      "url": "https://res.cloudinary.com/.../photo1.jpg",
+      "fileName": "photo1.jpg",
+      "mimeType": "image/jpeg",
+      "size": 234567,
+      "width": 1920,
+      "height": 1080
+    },
+    /* ... thêm ảnh */
+  ]
+}
+```
+
+**Cho message bị recall (Step 2b):** `isDeleted: true`, `content: null`, `attachments: []` → FE render "Tin nhắn đã thu hồi".
+
+---
+
+### 1. Create or Get direct conversation
+
+```http
+POST /api/v1/conversations/direct
+Content-Type: application/json
+```
+
+**Idempotent** — nếu đã có direct chat giữa current user & target → trả về luôn, không tạo trùng.
+
+**Body:**
+```json
+{ "otherUserId": "5" }
+```
+
+**Response 200:**
+```json
+{
+  "message": "Conversation ready.",
+  "data": { /* Conversation shape */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | `otherUserId === currentUserId` | `"Cannot start conversation with yourself."` |
+| 400 | `otherUserId` không phải numeric | `"Invalid otherUserId"` (Zod) |
+| 403 | Có quan hệ block 2 chiều | `"Cannot start conversation — user is blocked."` |
+| 404 | Other user không tồn tại / đã xóa | `"User not found."` |
+
+**FE pattern:**
+- Click "Message" trên profile user → `POST /conversations/direct { otherUserId }` → nhận `conversationId` → navigate `/chat/<conversationId>`
+- KHÔNG cần check trước có conversation chưa — endpoint tự xử lý
+
+---
+
+### 2. List conversations
+
+```http
+GET /api/v1/conversations?cursor=<lastMessageAtIso>&limit=20
+```
+
+**Query params:**
+| Param | Default | Range/Type | Mô tả |
+|---|---|---|---|
+| `cursor` | — | ISO timestamp | `lastMessageAt` của conversation cuối cùng đã load. Lần đầu bỏ trống. |
+| `limit` | `20` | `1-50` | Số conversation / lần load |
+
+**Response 200:**
+```json
+{
+  "message": "Get conversations successfully.",
+  "data": [ /* Conversation[] */ ],
+  "metadata": {
+    "limit": 20,
+    "nextCursor": "2026-05-06T10:00:00.000Z",
+    "hasNext": true
+  }
+}
+```
+
+**Lưu ý FE:**
+- Sort `lastMessageAt DESC` — conversation có message mới nhất ở đầu
+- Conversation user đã "Hide" sẽ KHÔNG xuất hiện (BE filter `deletedFor`)
+- Conversation chưa có message: `lastMessage: null` nhưng vẫn có `lastMessageAt = createdAt` để sort
+- Khi nhận `message:new` từ Socket → invalidate cache hoặc patch state thủ công (move conversation lên top + update lastMessage + tăng unreadCount nếu KHÔNG đang mở)
+
+---
+
+### 3. List messages của 1 conversation
+
+```http
+GET /api/v1/conversations/:id/messages?cursor=<messageObjectId>&limit=30
+```
+
+**Query params:**
+| Param | Default | Range/Type | Mô tả |
+|---|---|---|---|
+| `cursor` | — | ObjectId | `id` message cuối cùng đã load (tức message cũ nhất hiện có). Lần đầu bỏ trống. |
+| `limit` | `30` | `1-100` | Số message / lần load |
+
+**Response 200:**
+```json
+{
+  "message": "Get messages successfully.",
+  "data": [ /* Message[] sort _id DESC */ ],
+  "metadata": { "limit": 30, "nextCursor": "...", "hasNext": true }
+}
+```
+
+**Errors:** `404 "Conversation not found."` (cũng dùng khi user không phải participant — information hiding).
+
+**Lưu ý FE:**
+- BE trả `_id DESC` (newest first). Khi render UI thường reverse để hiển thị oldest → newest từ trên xuống
+- Pagination: scroll lên top → load thêm cũ hơn = `?cursor=<id message cũ nhất hiện có>`
+- Message đã "Remove for me" sẽ KHÔNG xuất hiện (BE filter `deletedFor`)
+- Message bị recall: `isDeleted: true`, content/attachments rỗng — FE render "Tin nhắn đã thu hồi"
+
+---
+
+### 4. Send message
+
+```http
+POST /api/v1/conversations/:id/messages
+Content-Type: multipart/form-data
+```
+
+**Body (multipart):**
+| Field | Type | Required | Mô tả |
+|---|---|---|---|
+| `content` | string | (xem refine) | Text message, max 5000 chars |
+| `replyTo` | string | optional | `id` message muốn reply (phải cùng conversation, chưa deleted) |
+| `attachments` | file[] | (xem refine) | Tối đa 10 file. Hiện tại Cloudinary chỉ allow `jpg/png/jpeg/webp/mp4/mov` |
+
+**Refine**: PHẢI có ít nhất 1 trong (`content` không rỗng, `attachments` ≥ 1 file). Cả 2 rỗng → 400.
+
+**Response 201:**
+```json
+{
+  "message": "Message sent.",
+  "data": { /* Message shape đầy đủ */ }
+}
+```
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | Cả content và attachments rỗng | `"Message content or attachments required."` |
+| 400 | content > 5000 chars | Validation error |
+| 400 | replyTo không phải ObjectId hợp lệ | Validation error |
+| 403 | User đã rời group (Step 2c) | `"You are not a member of this conversation."` |
+| 404 | Conversation không tồn tại / không phải participant | `"Conversation not found."` |
+| 404 | replyTo không tồn tại / khác conversation / đã deleted | `"Reply target not found."` |
+
+**Lưu ý FE:**
+- BE tự detect `type` từ attachments: tất cả image/video → `"image"`, có file thường → `"file"`, không attachment → `"text"`
+- Sau response 201, BE đã emit `message:new` qua Socket cho all participants (gồm cả sender) → có thể skip optimistic update
+- Hoặc optimistic add ngay với temp id, dedupe khi nhận socket event
+- File upload bị giới hạn format hiện tại — bạn cần file PDF/doc thì báo BE mở rộng `cloudinary.js` config
+
+---
+
+### 5. Mark as read
+
+```http
+PATCH /api/v1/conversations/:id/read
+```
+
+Mark mọi message trong conversation là đã đọc → reset `unreadCount = 0` + update `lastReadMessageId` của participant.
+
+**Response 200:**
+```json
+{
+  "message": "Marked as read.",
+  "lastReadMessageId": "662f9b2e4c5d6f001b3f4c5d"
+}
+```
+
+`lastReadMessageId: null` nếu conversation chưa có message nào.
+
+**Errors:** `404 "Conversation not found."`
+
+**FE pattern:**
+- Khi user mở conversation HOẶC focus trở lại window khi đang mở conversation → call API
+- Optimistic: set `unreadCount = 0` ngay
+- Sau response, BE emit `message:read` cho participants khác → họ thấy "Đã xem" cập nhật
+
+---
+
+### Edge cases & business rules cho FE
+
+| Tình huống | Backend xử lý | FE nên làm |
+|---|---|---|
+| 2 user cùng click "Message" tạo direct cùng lúc | `directKey` unique partial index → request 2 fail E11000, BE catch + findOne lấy doc đã tạo | — (transparent với FE) |
+| User block đối phương rồi mở chat cũ | 403 khi gửi message? KHÔNG — block check chỉ ở `createOrGetDirect`. Các action sau vẫn cho phép (TODO) | Optional: hide chat của user bị block trong list |
+| User Hide conversation rồi đối phương gửi message | BE `$pull deletedFor` → conversation un-hide cho mọi người | Conversation quay lại list của user đã hide |
+| User mở 2 tab chat cùng conversation | Cả 2 tab nhận `message:new`, `message:read` | Dedupe `message:new` by message.id |
+| Mark-as-read khi không có message nào | Trả `lastReadMessageId: null` (không lỗi) | Chỉ update UI nếu cần |
+| Send message tới conversation user vừa bị xóa khỏi group (2c) | `myParticipant.leftAt` → 403 | Reload conversation list (BE đã đẩy member ra) |
+| User tag/mention trong message | Chưa support — content là plain text | TODO v2 |
+| Reaction trên message | Schema có `reactions[]` nhưng API ở Step 2b | Chờ 2b |
+
+---
+
+### Suggested FE state structure (RTK Query)
+
+```js
+// chatApi.js
+getConversations: builder.query({
+  query: ({ cursor, limit = 20 }) => ({
+    url: "/conversations",
+    params: { ...(cursor && { cursor }), limit },
+  }),
+  providesTags: ["Conversations"],
+  serializeQueryArgs: ({ endpointName }) => endpointName,
+  merge: (currentCache, newItems, { arg }) => {
+    if (!arg?.cursor) return newItems;
+    currentCache.data.push(...newItems.data);
+    currentCache.metadata = newItems.metadata;
+  },
+  forceRefetch: ({ currentArg, previousArg }) =>
+    currentArg?.cursor !== previousArg?.cursor,
+}),
+
+getMessages: builder.query({
+  query: ({ conversationId, cursor, limit = 30 }) => ({
+    url: `/conversations/${conversationId}/messages`,
+    params: { ...(cursor && { cursor }), limit },
+  }),
+  serializeQueryArgs: ({ endpointName, queryArgs }) =>
+    `${endpointName}-${queryArgs.conversationId}`,
+  merge: (currentCache, newItems, { arg }) => {
+    if (!arg?.cursor) return newItems;
+    currentCache.data.push(...newItems.data); // append cũ hơn (load more lên)
+    currentCache.metadata = newItems.metadata;
+  },
+  forceRefetch: ({ currentArg, previousArg }) =>
+    currentArg?.cursor !== previousArg?.cursor,
+}),
+
+createOrGetDirect: builder.mutation({
+  query: (otherUserId) => ({
+    url: "/conversations/direct",
+    method: "POST",
+    body: { otherUserId },
+  }),
+  invalidatesTags: ["Conversations"],
+}),
+
+sendMessage: builder.mutation({
+  query: ({ conversationId, formData }) => ({
+    url: `/conversations/${conversationId}/messages`,
+    method: "POST",
+    body: formData, // FormData chứa content + attachments[]
+  }),
+  // KHÔNG cần invalidate — Socket message:new sẽ tự update
+}),
+
+markAsRead: builder.mutation({
+  query: (conversationId) => ({
+    url: `/conversations/${conversationId}/read`,
+    method: "PATCH",
+  }),
+  // Optimistic update unreadCount = 0
+  async onQueryStarted(conversationId, { dispatch, queryFulfilled }) {
+    const patch = dispatch(
+      chatApi.util.updateQueryData("getConversations", undefined, (draft) => {
+        const conv = draft.data.find((c) => c.id === conversationId);
+        if (conv) conv.unreadCount = 0;
+      }),
+    );
+    try { await queryFulfilled; }
+    catch { patch.undo(); }
+  },
+}),
+```
+
+### Suggested UI flow
+
+```
+1. App shell mount → Socket đã connect (từ Notification setup)
+   → listen "message:new" + "message:read", patch RTK cache thủ công
+
+2. Sidebar conversation list:
+   - Query getConversations → render với badge unreadCount
+   - Click 1 conversation → navigate /chat/<id>
+
+3. Chat page (/chat/:id):
+   - Query getMessages (limit=30) → render reverse (oldest top, newest bottom)
+   - Khi mở: gọi markAsRead → reset badge của conversation này
+   - Scroll lên top → load thêm: getMessages(cursor=<id message cũ nhất>)
+   - Input gõ + chọn file → sendMessage (FormData)
+
+4. Khi nhận `message:new` qua Socket:
+   - Nếu đang mở chat đúng conversationId → append message vào cuối + auto markAsRead
+   - Nếu đang ở chat khác / sidebar → update lastMessage + tăng unreadCount của conversation đó
+
+5. Khi nhận `message:read` qua Socket:
+   - Update UI "Đã xem" cho mọi message của me có _id <= lastReadMessageId
+
+6. "Message" button trên profile user:
+   - Click → createOrGetDirect → nhận conversationId → navigate /chat/<id>
 ```
 
