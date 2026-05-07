@@ -977,3 +977,763 @@ export const toggleMessageReactionService = async ({
     reactions: reactionsFormatted,
   };
 };
+
+// ============================================================
+// STEP 2c — GROUP CHAT
+// create group / get conversation detail / update group info /
+// add member / remove member / leave / change role
+// ============================================================
+
+// ============ HELPER: createSystemMessage ============
+// Tự tạo message type="system" cho event group (member_added, group_name_changed,...).
+// Cập nhật Conversation.lastMessage preview để FE hiển thị trên sidebar.
+//
+// previewText: BE-generated string (đã include tên actor/target) cho preview gọn.
+// FE render trong chat thread sẽ dùng systemMeta để build template riêng.
+const createSystemMessage = async ({
+  conversationId,
+  actorId,
+  action,
+  targetUserId = null,
+  payload = null,
+  previewText,
+}) => {
+  const message = await Message.create({
+    conversationId,
+    senderId: actorId,
+    type: "system",
+    content: previewText, // FE có thể dùng nếu không muốn build từ systemMeta
+    systemMeta: { action, targetUserId, payload },
+  });
+
+  await Conversation.updateOne(
+    { _id: conversationId },
+    {
+      $set: {
+        lastMessage: {
+          messageId: message._id,
+          type: "system",
+          content: previewText,
+          senderId: actorId,
+          createdAt: message.createdAt,
+        },
+        lastMessageAt: message.createdAt,
+      },
+    },
+  );
+
+  return message;
+};
+
+// ============ HELPER: emit conversation update ============
+// Re-fetch fresh conv (sau mọi update) → emit "conversation:updated" tới tất cả
+// participants (gồm cả vừa-rời để họ cập nhật UI lần cuối). Trả về formatted
+// conversation luôn để caller dùng làm response (tránh stale doc bug).
+//
+// extraIds: thêm user ngoài conv hiện tại (vd vừa add vào nhóm — mặc dù họ
+// cũng đã có trong fresh.participants sau update, nhưng để API tương thích).
+const emitConversationUpdated = async (
+  conv,
+  currentUserIdStr,
+  extraIds = [],
+) => {
+  const fresh = await Conversation.findById(conv._id).lean();
+  if (!fresh) return null;
+
+  const allUserIds = new Set(
+    fresh.participants.map((p) => p.userId.toString()),
+  );
+  for (const id of extraIds) allUserIds.add(id.toString());
+
+  const userMap = await buildUserMap(
+    [...allUserIds].map((id) => BigInt(id)),
+  );
+  const formatted = formatConversationDetail(fresh, currentUserIdStr, userMap);
+
+  for (const uidStr of allUserIds) {
+    emitToUser(BigInt(uidStr), "conversation:updated", {
+      conversation: formatted,
+    });
+  }
+  return formatted;
+};
+
+// ============ HELPER: format conversation detail (full members) ============
+// Khác với formatConversation cơ bản (chỉ peer cho direct), shape này có
+// FULL participants list — dùng cho GET /:id (group settings page).
+const formatConversationDetail = (conv, currentUserIdStr, userMap) => {
+  const myParticipant = conv.participants.find(
+    (p) => p.userId.toString() === currentUserIdStr,
+  );
+  const isMuted =
+    myParticipant?.mutedUntil &&
+    new Date(myParticipant.mutedUntil) > new Date();
+
+  // Cho direct: peer = participant kia. Cho group: null.
+  let peer = null;
+  if (conv.type === "direct") {
+    const peerParticipant = conv.participants.find(
+      (p) => p.userId.toString() !== currentUserIdStr,
+    );
+    if (peerParticipant) {
+      peer = formatUser(userMap.get(peerParticipant.userId.toString()));
+    }
+  }
+
+  return {
+    id: conv._id.toString(),
+    type: conv.type,
+    peer,
+    group: conv.group
+      ? {
+          name: conv.group.name,
+          description: conv.group.description || null,
+          avatar: conv.group.avatar || null,
+          createdBy: conv.group.createdBy?.toString(),
+        }
+      : null,
+    participants: conv.participants.map((p) => ({
+      user: formatUser(userMap.get(p.userId.toString())),
+      role: p.role,
+      joinedAt: p.joinedAt,
+      leftAt: p.leftAt || null,
+      lastReadMessageId: p.lastReadMessageId?.toString() || null,
+    })),
+    lastMessage: conv.lastMessage
+      ? {
+          id: conv.lastMessage.messageId?.toString(),
+          type: conv.lastMessage.type,
+          content: conv.lastMessage.content,
+          senderId: conv.lastMessage.senderId.toString(),
+          createdAt: conv.lastMessage.createdAt,
+        }
+      : null,
+    lastMessageAt: conv.lastMessageAt,
+    unreadCount: getUnreadCount(conv, currentUserIdStr),
+    isMuted: !!isMuted,
+    myRole: myParticipant?.role || null,
+    myLeftAt: myParticipant?.leftAt || null,
+    createdAt: conv.createdAt,
+    updatedAt: conv.updatedAt,
+  };
+};
+
+// ============ HELPER: assert admin role ============
+// Throw 403 nếu user không phải admin của group.
+const assertAdmin = (conv, userIdStr) => {
+  const me = conv.participants.find(
+    (p) => p.userId.toString() === userIdStr,
+  );
+  if (!me || me.leftAt) {
+    const err = new Error("You are not a member of this conversation.");
+    err.status = 403;
+    throw err;
+  }
+  if (me.role !== "admin") {
+    const err = new Error("Admin permission required.");
+    err.status = 403;
+    throw err;
+  }
+  return me;
+};
+
+// ============ CREATE GROUP CONVERSATION ============
+// FE gửi multipart: name, description, memberIds (JSON array), avatar (file).
+// Creator tự động được thêm với role=admin. Group min 2 người (creator + 1 member).
+//
+// Validate: tất cả memberIds phải tồn tại trong MySQL (filter ra user không tồn tại).
+// Block check skip cho group create (giữ UX đơn giản — TODO v2).
+//
+// Emit "conversation:created" tới TẤT CẢ members (gồm creator) để FE prepend vào list.
+export const createGroupConversationService = async ({
+  creatorId,
+  name,
+  description,
+  memberIds,
+  avatarFile, // optional — { path, filename } từ multer-cloudinary
+}) => {
+  const creator = BigInt(creatorId);
+
+  // Filter dedupe + loại creator nếu lỡ include
+  const memberSet = new Set(memberIds.map((id) => id.toString()));
+  memberSet.delete(creator.toString());
+  const cleanedMemberIds = [...memberSet].map((id) => BigInt(id));
+
+  if (cleanedMemberIds.length < 1) {
+    const err = new Error("At least 1 member required (besides creator).");
+    err.status = 400;
+    throw err;
+  }
+
+  // Verify all members tồn tại trong MySQL
+  const validUsers = await prisma.user.findMany({
+    where: {
+      id: { in: cleanedMemberIds },
+      isDeleted: false,
+    },
+    select: { id: true },
+  });
+  if (validUsers.length !== cleanedMemberIds.length) {
+    const err = new Error("Some members not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  // Build participants array: creator (admin) + members (member)
+  const participants = [
+    { userId: creator, role: "admin" },
+    ...cleanedMemberIds.map((id) => ({ userId: id, role: "member" })),
+  ];
+
+  const now = new Date();
+  const group = {
+    name,
+    description: description || null,
+    avatar: avatarFile?.path || null,
+    avatarPublicId: avatarFile?.filename || null,
+    createdBy: creator,
+  };
+
+  const conversation = await Conversation.create({
+    type: "group",
+    participants,
+    group,
+    lastMessageAt: now, // để xuất hiện top trên list ngay
+    unreadCounts: {},
+  });
+
+  // Bulk fetch user info để format response + emit
+  const allUserIds = [creator, ...cleanedMemberIds];
+  const userMap = await buildUserMap(allUserIds);
+
+  const formatted = formatConversationDetail(
+    conversation.toObject(),
+    creator.toString(),
+    userMap,
+  );
+
+  // Emit "conversation:created" cho tất cả members
+  for (const uid of allUserIds) {
+    emitToUser(uid, "conversation:created", { conversation: formatted });
+  }
+
+  return formatted;
+};
+
+// ============ GET CONVERSATION DETAIL (full members) ============
+// Dùng cho group settings page hoặc generic chat detail.
+// Direct conversation cũng work — trả peer info + participants list (2 entry).
+export const getConversationByIdService = async ({
+  conversationId,
+  userId,
+}) => {
+  const me = BigInt(userId);
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findOne({
+    _id: conversationId,
+    "participants.userId": me, // user phải là participant (gồm cả đã leftAt)
+  }).lean();
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  // Bulk fetch all participant user info
+  const allUserIds = conv.participants.map((p) => p.userId);
+  const userMap = await buildUserMap(allUserIds);
+
+  return formatConversationDetail(conv, me.toString(), userMap);
+};
+
+// ============ UPDATE GROUP INFO ============
+// Admin only. Update name / description / avatar (multipart cho avatar).
+// Mỗi thay đổi tạo 1 system message + emit "conversation:updated".
+//
+// Cleanup avatar cũ Cloudinary nếu thay avatar mới (best-effort).
+export const updateGroupInfoService = async ({
+  conversationId,
+  userId,
+  name,
+  description,
+  avatarFile, // optional — multer-cloudinary file
+}) => {
+  const me = BigInt(userId);
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (conv.type !== "group") {
+    const err = new Error("Only group conversations support this action.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Verify user là active admin
+  assertAdmin(conv, me.toString());
+
+  const changes = []; // [{ action, payload, previewText }]
+  const oldAvatarPublicId = conv.group.avatarPublicId;
+
+  // Detect changes
+  if (name !== undefined && name !== null && name !== conv.group.name) {
+    const oldName = conv.group.name;
+    changes.push({
+      action: "group_name_changed",
+      payload: { oldName, newName: name },
+      previewText: `đã đổi tên nhóm thành "${name}"`,
+    });
+    conv.group.name = name;
+  }
+  if (description !== undefined && description !== conv.group.description) {
+    // No system message cho description change (giống FB không noti)
+    conv.group.description = description;
+  }
+  if (avatarFile) {
+    changes.push({
+      action: "group_avatar_changed",
+      payload: null,
+      previewText: "đã đổi ảnh nhóm",
+    });
+    conv.group.avatar = avatarFile.path;
+    conv.group.avatarPublicId = avatarFile.filename;
+  }
+
+  // Phải có ít nhất 1 thay đổi
+  if (changes.length === 0 && description === undefined) {
+    const err = new Error("No changes provided.");
+    err.status = 400;
+    throw err;
+  }
+
+  await conv.save();
+
+  // Cleanup Cloudinary avatar cũ (best-effort)
+  if (avatarFile && oldAvatarPublicId) {
+    try {
+      await cloudinary.uploader.destroy(oldAvatarPublicId);
+    } catch (err) {
+      console.error("[Cloudinary] destroy old avatar failed:", err.message);
+    }
+  }
+
+  // Lookup actor displayName cho previewText
+  const actor = await prisma.user.findUnique({
+    where: { id: me },
+    select: {
+      userName: true,
+      profile: { select: { displayName: true } },
+    },
+  });
+  const actorName = actor?.profile?.displayName || actor?.userName || "Ai đó";
+
+  // Tạo system message + emit cho mỗi change có user-visible preview
+  const systemMessages = [];
+  for (const change of changes) {
+    const message = await createSystemMessage({
+      conversationId: conv._id,
+      actorId: me,
+      action: change.action,
+      targetUserId: null,
+      payload: change.payload,
+      previewText: `${actorName} ${change.previewText}`,
+    });
+    systemMessages.push(message);
+  }
+
+  // Emit "message:new" cho mỗi system message (trước emitConversationUpdated
+  // để FE nhận message mới rồi mới refresh lastMessage preview)
+  if (systemMessages.length > 0) {
+    const userMap = await buildUserMap([me]);
+    const allActiveIds = conv.participants
+      .filter((p) => !p.leftAt)
+      .map((p) => p.userId);
+
+    for (const msg of systemMessages) {
+      const formatted = formatMessage(
+        msg.toObject(),
+        userMap.get(me.toString()),
+        null,
+        null,
+      );
+      for (const uid of allActiveIds) {
+        emitToUser(uid, "message:new", {
+          conversationId: conv._id.toString(),
+          message: formatted,
+        });
+      }
+    }
+  }
+
+  // Re-fetch fresh + emit "conversation:updated" + return formatted
+  return await emitConversationUpdated(conv, me.toString());
+};
+
+// ============ ADD MEMBERS (admin only) ============
+// Multi-add. Đối với user đã từng leftAt → reactivate (clear leftAt + reset joinedAt).
+// Đối với user chưa từng tham gia → push entry mới với role=member.
+// Tạo 1 system message / member added.
+export const addMembersService = async ({
+  conversationId,
+  userId,
+  memberIds,
+}) => {
+  const me = BigInt(userId);
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (conv.type !== "group") {
+    const err = new Error("Only group conversations support this action.");
+    err.status = 400;
+    throw err;
+  }
+
+  assertAdmin(conv, me.toString());
+
+  // Filter dedupe + loại self
+  const memberSet = new Set(memberIds.map((id) => id.toString()));
+  memberSet.delete(me.toString());
+  const cleanedIds = [...memberSet].map((id) => BigInt(id));
+
+  if (cleanedIds.length === 0) {
+    const err = new Error("No valid memberIds provided.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Verify all tồn tại trong MySQL
+  const validUsers = await prisma.user.findMany({
+    where: { id: { in: cleanedIds }, isDeleted: false },
+    select: {
+      id: true,
+      userName: true,
+      profile: { select: { displayName: true } },
+    },
+  });
+  if (validUsers.length !== cleanedIds.length) {
+    const err = new Error("Some members not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  // Detect: chưa từng có vs đã từng leftAt vs active
+  const existingMap = new Map(
+    conv.participants.map((p) => [p.userId.toString(), p]),
+  );
+  const actuallyAdded = []; // BigInt[] — dùng cho previewText + system msg
+
+  for (const id of cleanedIds) {
+    const existing = existingMap.get(id.toString());
+    if (!existing) {
+      // Push mới
+      conv.participants.push({
+        userId: id,
+        role: "member",
+        joinedAt: new Date(),
+      });
+      actuallyAdded.push(id);
+    } else if (existing.leftAt) {
+      // Reactivate
+      existing.leftAt = null;
+      existing.joinedAt = new Date();
+      actuallyAdded.push(id);
+    }
+    // else: đã active, skip
+  }
+
+  if (actuallyAdded.length === 0) {
+    const err = new Error("All specified users are already active members.");
+    err.status = 400;
+    throw err;
+  }
+
+  await conv.save();
+
+  // Lookup actor name
+  const actor = await prisma.user.findUnique({
+    where: { id: me },
+    select: { userName: true, profile: { select: { displayName: true } } },
+  });
+  const actorName = actor?.profile?.displayName || actor?.userName || "Ai đó";
+  const userInfoMap = new Map(
+    validUsers.map((u) => [
+      u.id.toString(),
+      u.profile?.displayName || u.userName,
+    ]),
+  );
+
+  // 1 system message / user added
+  for (const targetId of actuallyAdded) {
+    const targetName = userInfoMap.get(targetId.toString()) || "ai đó";
+    await createSystemMessage({
+      conversationId: conv._id,
+      actorId: me,
+      action: "member_added",
+      targetUserId: targetId,
+      payload: null,
+      previewText: `${actorName} đã thêm ${targetName} vào nhóm`,
+    });
+  }
+
+  // Re-fetch fresh + emit + return formatted (tránh stale lastMessage)
+  return await emitConversationUpdated(conv, me.toString(), actuallyAdded);
+};
+
+// ============ REMOVE MEMBER (admin kicks someone) ============
+// Set leftAt cho participant đó. Tạo system message "X đã xóa Y".
+// Emit "conversation:updated" — user bị kick cũng nhận để FE update UI
+// "Bạn đã bị xóa khỏi nhóm".
+export const removeMemberService = async ({
+  conversationId,
+  userId,
+  targetUserId,
+}) => {
+  const me = BigInt(userId);
+  const target = BigInt(targetUserId);
+
+  if (me === target) {
+    const err = new Error(
+      "Cannot remove yourself — use leave group instead.",
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (conv.type !== "group") {
+    const err = new Error("Only group conversations support this action.");
+    err.status = 400;
+    throw err;
+  }
+
+  assertAdmin(conv, me.toString());
+
+  const targetParticipant = conv.participants.find(
+    (p) => p.userId.toString() === target.toString(),
+  );
+  if (!targetParticipant || targetParticipant.leftAt) {
+    const err = new Error("Member not found in group.");
+    err.status = 404;
+    throw err;
+  }
+
+  // Set leftAt
+  targetParticipant.leftAt = new Date();
+  await conv.save();
+
+  // Lookup names cho previewText
+  const [actor, targetUser] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: me },
+      select: { userName: true, profile: { select: { displayName: true } } },
+    }),
+    prisma.user.findUnique({
+      where: { id: target },
+      select: { userName: true, profile: { select: { displayName: true } } },
+    }),
+  ]);
+  const actorName = actor?.profile?.displayName || actor?.userName || "Ai đó";
+  const targetName =
+    targetUser?.profile?.displayName || targetUser?.userName || "ai đó";
+
+  await createSystemMessage({
+    conversationId: conv._id,
+    actorId: me,
+    action: "member_removed",
+    targetUserId: target,
+    payload: null,
+    previewText: `${actorName} đã xóa ${targetName} khỏi nhóm`,
+  });
+
+  // Re-fetch fresh + emit cho TẤT CẢ (gồm user vừa bị kick) + return formatted
+  return await emitConversationUpdated(conv, me.toString());
+};
+
+// ============ LEAVE GROUP (self) ============
+// Set leftAt của chính user. Tạo system message "X đã rời nhóm".
+// Note: nếu user là admin duy nhất → vẫn cho leave (group thành "no admin",
+// chấp nhận edge case này cho MVP — group sẽ không update được info nữa
+// nhưng vẫn có thể chat). FB cũng allow.
+export const leaveGroupService = async ({ conversationId, userId }) => {
+  const me = BigInt(userId);
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (conv.type !== "group") {
+    const err = new Error("Only group conversations support this action.");
+    err.status = 400;
+    throw err;
+  }
+
+  const myParticipant = conv.participants.find(
+    (p) => p.userId.toString() === me.toString(),
+  );
+  if (!myParticipant) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (myParticipant.leftAt) {
+    const err = new Error("You have already left this group.");
+    err.status = 400;
+    throw err;
+  }
+
+  myParticipant.leftAt = new Date();
+  await conv.save();
+
+  const actor = await prisma.user.findUnique({
+    where: { id: me },
+    select: { userName: true, profile: { select: { displayName: true } } },
+  });
+  const actorName = actor?.profile?.displayName || actor?.userName || "Ai đó";
+
+  await createSystemMessage({
+    conversationId: conv._id,
+    actorId: me,
+    action: "member_left",
+    targetUserId: null,
+    payload: null,
+    previewText: `${actorName} đã rời nhóm`,
+  });
+
+  // Emit cho all participants (gồm cả user vừa rời để tab khác sync UI)
+  await emitConversationUpdated(conv, me.toString());
+
+  return { left: true };
+};
+
+// ============ CHANGE MEMBER ROLE (admin promotes/demotes) ============
+// admin only. Đổi role của target giữa "admin" và "member".
+// Tạo system message + emit conversation:updated.
+export const changeMemberRoleService = async ({
+  conversationId,
+  userId,
+  targetUserId,
+  role,
+}) => {
+  const me = BigInt(userId);
+  const target = BigInt(targetUserId);
+
+  if (me === target) {
+    const err = new Error("Cannot change your own role.");
+    err.status = 400;
+    throw err;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+
+  const conv = await Conversation.findById(conversationId);
+  if (!conv) {
+    const err = new Error("Conversation not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (conv.type !== "group") {
+    const err = new Error("Only group conversations support this action.");
+    err.status = 400;
+    throw err;
+  }
+
+  assertAdmin(conv, me.toString());
+
+  const targetParticipant = conv.participants.find(
+    (p) => p.userId.toString() === target.toString(),
+  );
+  if (!targetParticipant || targetParticipant.leftAt) {
+    const err = new Error("Member not found in group.");
+    err.status = 404;
+    throw err;
+  }
+
+  if (targetParticipant.role === role) {
+    const err = new Error(`Member already has role "${role}".`);
+    err.status = 400;
+    throw err;
+  }
+
+  const action = role === "admin" ? "admin_promoted" : "admin_demoted";
+  targetParticipant.role = role;
+  await conv.save();
+
+  // System message
+  const [actor, targetUser] = await Promise.all([
+    prisma.user.findUnique({
+      where: { id: me },
+      select: { userName: true, profile: { select: { displayName: true } } },
+    }),
+    prisma.user.findUnique({
+      where: { id: target },
+      select: { userName: true, profile: { select: { displayName: true } } },
+    }),
+  ]);
+  const actorName = actor?.profile?.displayName || actor?.userName || "Ai đó";
+  const targetName =
+    targetUser?.profile?.displayName || targetUser?.userName || "ai đó";
+  const previewText =
+    role === "admin"
+      ? `${actorName} đã chỉ định ${targetName} làm quản trị viên`
+      : `${actorName} đã hạ ${targetName} khỏi vai trò quản trị viên`;
+
+  await createSystemMessage({
+    conversationId: conv._id,
+    actorId: me,
+    action,
+    targetUserId: target,
+    payload: null,
+    previewText,
+  });
+
+  // Re-fetch fresh + emit + return formatted (tránh stale lastMessage)
+  return await emitConversationUpdated(conv, me.toString());
+};
