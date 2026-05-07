@@ -108,7 +108,7 @@ prisma/
 - **TODO**: `collab_invite` (cần thêm enum value), `comment_reaction`, `message`
 - Xem chi tiết API ở section [API Reference — Notification](#api-reference--notification-fe-integration-guide) bên dưới
 
-### ✅ Chat — Step 2a (Direct 1-1 core) + Step 2b (Message actions)
+### ✅ Chat — Step 2a (Direct 1-1) + 2b (Message actions) + 2c (Group chat)
 
 - **Storage**: MongoDB (Mongoose). 2 collection chính: `Conversation`, `Message`
 - **Cross-DB lookup**: bulk-fetch User+Profile từ MySQL (giống pattern Notification) — chống N+1 khi list conversations + messages
@@ -122,14 +122,18 @@ prisma/
 - **Edit message**: chỉ owner, chỉ áp dụng `type="text"` (image/file/system disallow), set `isEdited=true` + `editedAt`. Nếu là `lastMessage` của conversation → cập nhật preview
 - **Recall message** (FB "Unsend for everyone"): chỉ owner, set `isDeleted=true` + cleanup Cloudinary attachments (best-effort). `lastMessage` preview thành "Tin nhắn đã thu hồi". KHÔNG hard-delete để giữ audit + replyTo references
 - **Reaction**: reference `ReactionMaster` (MySQL) — 7 reactions cố định (`like/love/care/haha/wow/sad/angry`). Denormalize `keyName` + `icon` vào Message → FE render trực tiếp không cần lookup. 1 user 1 reaction / message; toggle/replace logic
-- **Socket events** đã wire (6 events):
-  - `message:new`: emit khi gửi message (gồm cả sender)
+- **Group chat (2c)**: type="group" với `participants[].role: admin/member`. Creator auto-add với role admin. Multi-admin allowed. Re-add user đã `leftAt` → reactivate (clear leftAt + reset joinedAt)
+- **System messages**: tự động tạo cho 7 group event (`member_added`, `member_removed`, `member_left`, `group_name_changed`, `group_avatar_changed`, `admin_promoted`, `admin_demoted`). BE generate previewText (Tiếng Việt, có tên actor + target) → lastMessage cập nhật ngay
+- **Removed/left user vẫn nhận `conversation:updated` event 1 lần cuối** để FE update UI "Bạn đã bị xóa khỏi nhóm"
+- **Socket events** đã wire (8 events):
+  - `message:new`: emit khi gửi message (gồm cả sender) + system message group event
   - `message:read`: emit khi mark as read → other participants thấy "Đã xem"
   - `message:edited`: emit khi edit thành công, payload kèm full message updated
   - `message:recalled`: emit khi recall, FE re-render với "Tin nhắn đã thu hồi"
   - `message:removed-for-me`: emit **chỉ về self** (multi-tab sync) khi remove for me
   - `message:reaction:updated`: emit reactions array mới sau toggle
-- **Pending Step 2c**: group chat (member roles, add/remove, system messages)
+  - `conversation:created`: emit khi group được tạo → tất cả members prepend vào list
+  - `conversation:updated`: emit khi group info / membership / role thay đổi → FE patch state
 - Xem chi tiết API ở section [API Reference — Chat](#api-reference--chat-fe-integration-guide) bên dưới
 
 ### 🔲 Schema-only (chưa có API)
@@ -1513,13 +1517,12 @@ function ProfilePage() {
 >   - `conversationId` / `messageId` / `lastReadMessageId` / `replyTo.id`: Mongo ObjectId — string 24 hex chars
 >   - `userId` / `senderId` / `peer.id`: BigInt MySQL → string
 
-### Status — Direct chat 1-1 (2a) + Message actions (2b)
+### Status — Direct (2a) + Message actions (2b) + Group chat (2c)
 
 Đã có:
 - **Step 2a**: createOrGet direct conversation, list conversations, list messages, send message, mark as read
 - **Step 2b**: edit message, recall (delete for everyone), remove for me, toggle reaction (FB-like)
-
-Pending **Step 2c**: group chat (create group, add/remove members, member roles, group avatar/name, system messages).
+- **Step 2c**: create group, get conversation detail (full members), update group info, add/remove members, leave group, change member role + 7 loại system message tự động
 
 ---
 
@@ -1653,6 +1656,33 @@ socket.on("message:reaction:updated", ({ conversationId, messageId, reactions })
 ```
 
 > Emit cho **TẤT CẢ active participants**.
+
+#### Listen `conversation:created` (Step 2c)
+
+```js
+socket.on("conversation:created", ({ conversation }) => {
+  // Prepend conversation vào list (sidebar)
+  // Emit khi: 1 user tạo group → tất cả members đều nhận event này
+});
+```
+
+**Payload shape:** `{ conversation: <full Conversation Detail shape> }`
+
+> Emit cho **TẤT CẢ members** (gồm creator — multi-tab sync).
+
+#### Listen `conversation:updated` (Step 2c)
+
+```js
+socket.on("conversation:updated", ({ conversation }) => {
+  // Replace conversation theo id trong cache
+  // Emit khi: update group info / add member / remove member / leave / change role
+  // Nếu myParticipant.leftAt set → render UI "Bạn đã rời / bị xóa khỏi nhóm"
+});
+```
+
+**Payload shape:** `{ conversation: <full Conversation Detail shape> }`
+
+> Emit cho **TẤT CẢ participants gồm cả vừa-rời** (để họ update UI lần cuối).
 
 ---
 
@@ -2098,6 +2128,309 @@ Content-Type: application/json
 
 ---
 
+### Response shape — Conversation Detail (Step 2c, full members list)
+
+Dùng cho `GET /:id`, `POST /group`, `PATCH /:id/group`, `POST /:id/members`, etc. Khác với "Conversation cơ bản" ở chỗ có `participants[]` đầy đủ (full user info + role + leftAt + lastReadMessageId).
+
+```json
+{
+  "id": "65...",
+  "type": "group",
+  "peer": null,
+  "group": {
+    "name": "FC Anh Em",
+    "description": "ACE sinh hoạt đội bóng nhé",
+    "avatar": "https://res.cloudinary.com/.../group_avatar.jpg",
+    "createdBy": "3"
+  },
+  "participants": [
+    {
+      "user": {
+        "id": "3",
+        "userName": "minhvu",
+        "displayName": "Minh Vũ",
+        "avatar": "https://..."
+      },
+      "role": "admin",
+      "joinedAt": "2026-05-06T...",
+      "leftAt": null,
+      "lastReadMessageId": "65fa..."
+    },
+    {
+      "user": { "id": "4", ... },
+      "role": "member",
+      "joinedAt": "2026-05-06T...",
+      "leftAt": null,
+      "lastReadMessageId": null
+    }
+  ],
+  "lastMessage": {
+    "id": "65fb...",
+    "type": "system",
+    "content": "Minh Vũ đã thêm Hoa Nguyễn vào nhóm",
+    "senderId": "3",
+    "createdAt": "..."
+  },
+  "lastMessageAt": "...",
+  "unreadCount": 0,
+  "isMuted": false,
+  "myRole": "admin",
+  "myLeftAt": null,
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+```
+
+**FE notes:**
+- `participants[].leftAt`: nếu set → user đã rời/bị xóa, FE thường ẩn họ khỏi member list nhưng giữ trong "Former members" tab
+- `myRole`: dùng để FE show/hide button quản lý nhóm (chỉ admin có quyền)
+- `myLeftAt`: nếu set → render banner "Bạn đã rời/bị xóa khỏi nhóm này" + disable input gửi message
+- `lastMessage.type === "system"`: FE có thể dùng `content` BE-generated trực tiếp HOẶC parse `Message.systemMeta` để build template tùy chỉnh (lookup từ `getMessages`)
+
+---
+
+### System message types (Step 2c)
+
+Khi có sự kiện group, BE tự tạo message `type="system"` + `Conversation.lastMessage` cập nhật theo. 7 action:
+
+| `systemMeta.action` | Trigger | `content` template (BE-generated) | `targetUserId` | `payload` |
+|---|---|---|---|---|
+| `member_added` | Admin add user | `"<actor> đã thêm <target> vào nhóm"` | userId mới được add | `null` |
+| `member_removed` | Admin kick user | `"<actor> đã xóa <target> khỏi nhóm"` | userId bị kick | `null` |
+| `member_left` | Self leave | `"<actor> đã rời nhóm"` | `null` | `null` |
+| `group_name_changed` | Admin đổi tên | `"<actor> đã đổi tên nhóm thành <newName>"` | `null` | `{ oldName, newName }` |
+| `group_avatar_changed` | Admin đổi avatar | `"<actor> đã đổi ảnh nhóm"` | `null` | `null` |
+| `admin_promoted` | Admin promote | `"<actor> đã chỉ định <target> làm quản trị viên"` | userId được promote | `null` |
+| `admin_demoted` | Admin demote | `"<actor> đã hạ <target> khỏi vai trò quản trị viên"` | userId bị demote | `null` |
+
+> `content` đã có trong `Message.content` + `Conversation.lastMessage.content` — FE có thể render trực tiếp. Nếu muốn customize (vd i18n English) → đọc `systemMeta.action + targetUserId + payload` để build template riêng.
+>
+> Update description KHÔNG tạo system message (giống FB).
+
+---
+
+### 10. Create group conversation
+
+```http
+POST /api/v1/conversations/group
+Content-Type: multipart/form-data
+```
+
+**Body (multipart):**
+| Field | Type | Required | Mô tả |
+|---|---|---|---|
+| `name` | string | ✅ | Tên nhóm, 1-100 chars |
+| `description` | string | optional | Mô tả nhóm, max 500 chars |
+| `memberIds` | string | ✅ | JSON array string của userId, vd `"[5, 7]"` (tối thiểu 1 member, không tính creator) |
+| `avatar` | file | optional | Ảnh nhóm. Cloudinary upload, format: `jpg/png/jpeg/webp` |
+
+**Response 201:** `{ message: "Group created.", data: <Conversation Detail> }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | name rỗng / quá dài | Validation error |
+| 400 | memberIds rỗng | `"At least 1 member required (besides creator)."` |
+| 400 | memberIds không phải numeric | `"memberIds must be numeric strings"` |
+| 404 | Có user trong memberIds không tồn tại | `"Some members not found."` |
+
+**Lưu ý FE:**
+- BE auto add creator với role=`admin`. FE chỉ gửi memberIds của user khác
+- BE auto filter creator nếu lỡ include trong memberIds
+- Sau response 201, BE đã emit `conversation:created` cho tất cả members → các tab khác auto prepend conversation vào list
+- Tối thiểu 2 người (creator + 1 member) — group 2 người vẫn là `type="group"`, không downgrade thành `direct`
+
+---
+
+### 11. Get conversation detail (full members)
+
+```http
+GET /api/v1/conversations/:id
+```
+
+Khác với `GET /conversations` (sidebar list) — endpoint này trả **full participants** với role + joinedAt + leftAt + lastReadMessageId. Dùng cho group settings page hoặc generic conversation detail.
+
+**Response 200:** `{ message, data: <Conversation Detail shape> }`
+
+**Errors:** `404 "Conversation not found."` (cho cả không tồn tại + không phải participant — information hiding).
+
+**Lưu ý FE:**
+- Direct conversation cũng work — `participants[]` có 2 entry, `peer` field set, `group: null`
+- User đã `leftAt` vẫn thấy được conversation cũ (read-only) — FE check `myLeftAt` để disable input
+- Endpoint này KHÔNG tăng/reset unreadCount (chỉ `markAsRead` mới reset)
+
+---
+
+### 12. Update group info (admin only)
+
+```http
+PATCH /api/v1/conversations/:id/group
+Content-Type: multipart/form-data
+```
+
+**Body (multipart, partial — gửi field nào muốn thay):**
+| Field | Type | Required | Mô tả |
+|---|---|---|---|
+| `name` | string | optional | 1-100 chars |
+| `description` | string | optional | max 500 chars (gửi rỗng = clear) |
+| `avatar` | file | optional | New avatar — BE auto destroy avatar cũ Cloudinary |
+
+**Response 200:** `{ message: "Group updated.", data: <Conversation Detail> }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | type=direct (không phải group) | `"Only group conversations support this action."` |
+| 400 | Không có field nào thay đổi | `"No changes provided."` |
+| 403 | User không phải admin | `"Admin permission required."` |
+| 403 | User đã rời nhóm | `"You are not a member of this conversation."` |
+| 404 | Conversation không tồn tại | `"Conversation not found."` |
+
+**Behavior backend:**
+- Mỗi field thay đổi (name, avatar) → tạo 1 system message tương ứng
+- Description thay đổi → KHÔNG tạo system message (giống FB)
+- Nếu thay avatar → destroy avatar cũ ở Cloudinary (best-effort)
+- Emit `conversation:updated` cho all participants
+- Emit `message:new` cho mỗi system message
+
+**Lưu ý FE:**
+- Nếu chỉ đổi description → không có system message nhưng vẫn nhận `conversation:updated`
+- Nhiều field cùng đổi → BE tạo nhiều system message (vd đổi name + avatar → 2 system messages)
+
+---
+
+### 13. Add members (admin only)
+
+```http
+POST /api/v1/conversations/:id/members
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{ "memberIds": ["5", "7"] }
+```
+
+Hoặc JSON array string: `{ "memberIds": "[5, 7]" }` (BE parse cả 2).
+
+**Response 200:** `{ message: "Members added.", data: <Conversation Detail> }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | type=direct | `"Only group conversations support this action."` |
+| 400 | Tất cả userId đã active member | `"All specified users are already active members."` |
+| 400 | memberIds rỗng | `"At least 1 memberId required."` |
+| 403 | User không phải admin | `"Admin permission required."` |
+| 404 | Có userId không tồn tại | `"Some members not found."` |
+
+**Behavior backend:**
+- User mới chưa từng tham gia → push entry mới với role=member, joinedAt=now
+- User đã từng `leftAt` → reactivate (clear leftAt + reset joinedAt) — KHÔNG tạo entry mới
+- User đang active → skip silently (không lỗi)
+- 1 system message `member_added` / mỗi user thực sự được add
+- Self trong memberIds → BE filter ra
+- Emit `conversation:updated` cho all + những người vừa được add
+
+**Lưu ý FE:**
+- Nếu add 3 user nhưng có 1 user đã active → BE tạo 2 system message + response cho biết operation success
+- User vừa được add nhận `conversation:updated` (do BE emit kèm `extraIds`) → FE prepend conversation vào list
+
+---
+
+### 14. Remove member (admin kicks)
+
+```http
+DELETE /api/v1/conversations/:id/members/:userId
+```
+
+**Response 200:** `{ message: "Member removed.", data: <Conversation Detail> }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | targetUserId === currentUserId | `"Cannot remove yourself — use leave group instead."` |
+| 400 | type=direct | `"Only group conversations support this action."` |
+| 403 | User không phải admin | `"Admin permission required."` |
+| 404 | Member không tồn tại / đã rời nhóm | `"Member not found in group."` |
+
+**Behavior backend:**
+- Set `participants[i].leftAt = now` (KHÔNG xóa entry — giữ history + replyTo references)
+- Tạo system message `member_removed`
+- Emit `conversation:updated` cho TẤT CẢ participants gồm user vừa bị kick (1 lần cuối) → FE của họ render UI "Bạn đã bị xóa"
+
+**Lưu ý FE:**
+- User bị kick reload sẽ vẫn thấy conversation trong list (read-only) — BE filter active participants chỉ ở `sendMessage`/action endpoints
+- FE check `myLeftAt` để disable input + hiện banner
+
+---
+
+### 15. Leave group (self)
+
+```http
+DELETE /api/v1/conversations/:id/leave
+```
+
+**Response 200:** `{ message: "Left group successfully.", left: true }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | type=direct | `"Only group conversations support this action."` |
+| 400 | Đã rời trước đó | `"You have already left this group."` |
+| 404 | Conversation không tồn tại / không phải participant | `"Conversation not found."` |
+
+**Behavior backend:**
+- Set `myParticipant.leftAt = now`
+- Tạo system message `member_left`
+- Emit `conversation:updated` cho tất cả gồm self (multi-tab sync UI)
+- Note edge case: nếu user là admin DUY NHẤT → vẫn cho leave (group thành "no admin", chấp nhận cho MVP — FB cũng allow)
+
+**Lưu ý FE:**
+- Sau leave, FE redirect về sidebar conversation list (đóng chat hiện tại)
+- Conversation vẫn xuất hiện trong list dưới dạng read-only (do FE filter `myLeftAt` để render UI)
+- Hoặc FE có thể tự ẩn → tùy UX
+
+---
+
+### 16. Change member role (admin promote/demote)
+
+```http
+PATCH /api/v1/conversations/:id/members/:userId/role
+Content-Type: application/json
+```
+
+**Body:**
+```json
+{ "role": "admin" }
+```
+
+`role` enum: `"admin"` hoặc `"member"`.
+
+**Response 200:** `{ message: "Role updated.", data: <Conversation Detail> }`
+
+**Errors:**
+| Code | Khi nào | Message |
+|---|---|---|
+| 400 | targetUserId === currentUserId | `"Cannot change your own role."` |
+| 400 | type=direct | `"Only group conversations support this action."` |
+| 400 | role không phải "admin"/"member" | Validation error |
+| 400 | Target đã có role đó | `"Member already has role 'admin'."` |
+| 403 | User không phải admin | `"Admin permission required."` |
+| 404 | Target không phải member / đã rời nhóm | `"Member not found in group."` |
+
+**Behavior backend:**
+- Update `participants[i].role`
+- Tạo system message `admin_promoted` hoặc `admin_demoted`
+- Emit `conversation:updated`
+
+**Lưu ý FE:**
+- Nhiều admin cùng tồn tại OK — FB cũng cho nhiều admin
+- Nếu admin demote chính mình thì không được (tự change own role bị 400) — phải nhờ admin khác hoặc leave nhóm
+- Edge: nếu chỉ còn 1 admin và admin đó leave → group thành "no admin", BE cho phép nhưng FE có thể warn user trước khi leave
+
+---
+
 ### Edge cases & business rules cho FE
 
 | Tình huống | Backend xử lý | FE nên làm |
@@ -2117,6 +2450,20 @@ Content-Type: application/json
 | Multi-tab: remove for me ở tab A | Tab B của me nhận `message:removed-for-me` | Remove khỏi UI; tab khác user vẫn thấy message bình thường |
 | User toggle reaction nhanh liên tục | Mỗi lần emit socket → có thể spam events | Debounce reaction button click 200-300ms ở FE |
 | Reaction trên message của chính mình | Cho phép (giống FB) | Render bình thường |
+| **Step 2c — Group chat** | | |
+| User bị kick khỏi nhóm | Set `leftAt`, emit `conversation:updated` 1 lần cuối cho user đó | Render banner "Bạn đã bị xóa khỏi nhóm" + disable input gửi message |
+| User self-leave nhóm | Set own `leftAt`, system message `member_left` | Redirect về sidebar list, hoặc render conversation read-only |
+| Re-add user đã từng leftAt | Reactivate participant entry (clear leftAt + reset joinedAt) | Bình thường — system message `member_added` xuất hiện |
+| Admin duy nhất leave nhóm | BE cho phép, group thành "no admin" — không thể update info, add member nữa | FE cảnh báo trước khi leave nếu là admin cuối |
+| Self change own role | 400 — phải nhờ admin khác | Disable button "Demote" cho chính mình trong UI |
+| Last admin demote chính mình | 400 vì không cho self-change | Disable hoặc require confirm UI |
+| Update group: chỉ đổi description | KHÔNG tạo system message (giống FB) | Vẫn nhận `conversation:updated` để patch state |
+| Update group: đổi name + avatar cùng lúc | BE tạo 2 system messages liên tiếp | FE nhận 2 `message:new` events, thread hiện 2 system msg |
+| Add member: trong list có user đã active | BE skip silently (không lỗi), chỉ thêm system msg cho user thực sự được add | Bình thường — list refresh thấy state mới |
+| Add member: trong list có 1 user duplicate | BE dedupe trước khi xử lý | Bình thường |
+| Avatar group đổi nhiều lần | BE auto destroy avatar cũ Cloudinary mỗi lần | Bình thường |
+| GET /:id direct conversation | Vẫn work — `peer` field set, `participants` có 2 entry | Có thể dùng cho profile chat detail |
+| User đã rời group gọi addMember | 403 "You are not a member" | UI ẩn nút quản lý cho non-admin |
 
 ---
 
@@ -2243,6 +2590,77 @@ toggleReaction: builder.mutation({
   }),
   // KHÔNG cần invalidate — Socket "message:reaction:updated" tự update
 }),
+
+// ===== Step 2c — Group chat =====
+
+createGroup: builder.mutation({
+  query: ({ name, description, memberIds, avatarFile }) => {
+    const formData = new FormData();
+    formData.append("name", name);
+    if (description) formData.append("description", description);
+    formData.append("memberIds", JSON.stringify(memberIds));
+    if (avatarFile) formData.append("avatar", avatarFile);
+    return {
+      url: "/conversations/group",
+      method: "POST",
+      body: formData,
+    };
+  },
+  invalidatesTags: ["Conversations"],
+}),
+
+getConversationById: builder.query({
+  query: (conversationId) => `/conversations/${conversationId}`,
+  providesTags: (result, error, conversationId) => [
+    { type: "ConversationDetail", id: conversationId },
+  ],
+}),
+
+updateGroupInfo: builder.mutation({
+  query: ({ conversationId, name, description, avatarFile }) => {
+    const formData = new FormData();
+    if (name !== undefined) formData.append("name", name);
+    if (description !== undefined) formData.append("description", description);
+    if (avatarFile) formData.append("avatar", avatarFile);
+    return {
+      url: `/conversations/${conversationId}/group`,
+      method: "PATCH",
+      body: formData,
+    };
+  },
+  // KHÔNG cần invalidate — Socket "conversation:updated" tự sync
+}),
+
+addMembers: builder.mutation({
+  query: ({ conversationId, memberIds }) => ({
+    url: `/conversations/${conversationId}/members`,
+    method: "POST",
+    body: { memberIds },
+  }),
+}),
+
+removeMember: builder.mutation({
+  query: ({ conversationId, userId }) => ({
+    url: `/conversations/${conversationId}/members/${userId}`,
+    method: "DELETE",
+  }),
+}),
+
+leaveGroup: builder.mutation({
+  query: (conversationId) => ({
+    url: `/conversations/${conversationId}/leave`,
+    method: "DELETE",
+  }),
+  invalidatesTags: ["Conversations"],
+}),
+
+changeMemberRole: builder.mutation({
+  query: ({ conversationId, userId, role }) => ({
+    url: `/conversations/${conversationId}/members/${userId}/role`,
+    method: "PATCH",
+    body: { role },
+  }),
+}),
 ```
 
 ### Suggested UI flow
@@ -2250,8 +2668,9 @@ toggleReaction: builder.mutation({
 ```
 1. App shell mount → Socket đã connect (từ Notification setup)
    → listen ALL chat events: message:new, message:read, message:edited,
-     message:recalled, message:removed-for-me, message:reaction:updated
-   → patch RTK cache (getMessages + getConversations) thủ công
+     message:recalled, message:removed-for-me, message:reaction:updated,
+     conversation:created, conversation:updated
+   → patch RTK cache (getMessages + getConversations + getConversationById) thủ công
 
 2. Sidebar conversation list:
    - Query getConversations → render với badge unreadCount
@@ -2272,5 +2691,29 @@ toggleReaction: builder.mutation({
 
 6. "Message" button trên profile user:
    - Click → createOrGetDirect → nhận conversationId → navigate /chat/<id>
+
+7. Tạo group:
+   - Modal "Create group" → input name + description + select members + upload avatar
+   - Submit → createGroup mutation (FormData) → nhận conversationId → navigate /chat/<id>
+   - Tất cả members nhận `conversation:created` socket → tab họ tự prepend conversation
+
+8. Group settings page (cho group conversation):
+   - Click icon "Info" trên header chat → mở panel
+   - Query getConversationById(conversationId) → render members list, group info, my role
+   - Nếu myRole === "admin": show buttons (Add member, Edit info, Kick, Promote/Demote)
+   - Mọi mutation (addMembers, removeMember, changeMemberRole, updateGroupInfo) →
+     KHÔNG cần invalidate → Socket "conversation:updated" tự patch state ở mọi tab
+
+9. Khi nhận `conversation:created` qua Socket:
+   - Prepend conversation vào sidebar list
+   - Toast "Bạn vừa được thêm vào nhóm <name>" (optional)
+
+10. Khi nhận `conversation:updated` qua Socket:
+    - Replace conversation theo id trong sidebar list cache + getConversationById cache
+    - Nếu `conversation.myLeftAt` set (vừa bị kick) → toast "Bạn đã bị xóa khỏi nhóm" + nếu đang mở chat đó → render banner read-only
+
+11. Khi `lastMessage.type === "system"` trên sidebar:
+    - Render `lastMessage.content` trực tiếp (BE đã build text)
+    - Hoặc parse `Message.systemMeta` cho i18n customization
 ```
 
