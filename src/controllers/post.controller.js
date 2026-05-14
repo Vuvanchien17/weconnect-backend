@@ -11,7 +11,6 @@ export const createPost = async (req, res) => {
   try {
     const { privacyId, taggedUserIds, collabUserIds, blocks } = req.body;
     const userId = req.user.id;
-    console.log(typeof blocks);
     const newPost = await createFullPostService(
       req?.files,
       userId,
@@ -25,7 +24,7 @@ export const createPost = async (req, res) => {
       post: newPost,
     });
   } catch (error) {
-    console.error("Error:", error.message);
+    console.error("Error:", error);
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };

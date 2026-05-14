@@ -170,7 +170,7 @@ export const changePassword = async (req, res) => {
     const isMatch = await bcrypt.compare(oldPassword, user.passwordHash);
     if (!isMatch) {
       return res.status(400).json({
-        message: "Password incorrect",
+        message: "Mật khẩu cũ không chính xác",
       });
     }
 
