@@ -1,4 +1,5 @@
 import prisma from "../config/prisma.js";
+import { getBlockListIds, getFriendIds } from "./friend.service.js";
 
 export const updateProfileService = async (userId, userData) => {
   const formattedData = {
@@ -226,4 +227,111 @@ export const fillBaseProfileService = async (userId, userData) => {
 
     return updatedUser;
   });
+};
+
+// ============ FRIEND SUGGESTIONS (People You May Know — FB-like) ============
+// Algorithm:
+// 1. Build exclusion set: me + friends + pending requests (both ways) + blocks (both ways)
+// 2. Fetch tối đa POOL_SIZE candidates NOT IN exclusion (newest first để bias toward
+//    active users mới)
+// 3. Bulk count mutual friends qua 1 groupBy query trên Friendship:
+//    SELECT userId, COUNT(*) WHERE userId IN candidates AND friendId IN myFriends
+// 4. Sort theo (mutualCount DESC, id DESC) — tie break theo recency
+// 5. Take top `limit`
+
+export const getFriendSuggestionsService = async ({ userId, limit }) => {
+  const me = BigInt(userId);
+  const take = Math.min(Math.max(Number(limit) || 10, 1), 50);
+  const POOL_SIZE = 100;
+
+  // 1. Build exclusion set (parallel)
+  const [myFriends, pendingRequests, blockList] = await Promise.all([
+    getFriendIds(me),
+    // Pending requests cả 2 chiều — lấy userId của bên kia
+    prisma.friendRequest.findMany({
+      where: {
+        status: "pending",
+        OR: [{ senderId: me }, { receiverId: me }],
+      },
+      select: { senderId: true, receiverId: true },
+    }),
+    getBlockListIds(me),
+  ]);
+
+  // Pending → list user khác
+  const pendingIds = pendingRequests.map((r) =>
+    r.senderId === me ? r.receiverId : r.senderId,
+  );
+
+  // Union tất cả exclusion (dedupe qua Set string)
+  const exclusionSet = new Set([me.toString()]);
+  myFriends.forEach((id) => exclusionSet.add(id.toString()));
+  pendingIds.forEach((id) => exclusionSet.add(id.toString()));
+  blockList.forEach((id) => exclusionSet.add(id.toString()));
+
+  const exclusionIds = [...exclusionSet].map((id) => BigInt(id));
+
+  // 2. Fetch candidate pool — newest first (id DESC) để bias active users
+  const candidates = await prisma.user.findMany({
+    where: {
+      id: { notIn: exclusionIds },
+      isDeleted: false,
+    },
+    take: POOL_SIZE,
+    orderBy: { id: "desc" },
+    select: {
+      id: true,
+      userName: true,
+      profile: { select: { displayName: true, avatar: true } },
+    },
+  });
+
+  if (candidates.length === 0) {
+    return { data: [] };
+  }
+
+  // 3. Bulk count mutual friends — chỉ chạy nếu user có bạn
+  // Mutual friends of candidate C = friends của C ∩ friends của me
+  // Query: select userId, COUNT(*)
+  //        from Friendship
+  //        where userId in candidates and friendId in myFriends
+  let mutualMap = new Map(); // candidateIdString → count
+  if (myFriends.length > 0) {
+    const counts = await prisma.friendship.groupBy({
+      by: ["userId"],
+      where: {
+        userId: { in: candidates.map((c) => c.id) },
+        friendId: { in: myFriends },
+      },
+      _count: { _all: true },
+    });
+    mutualMap = new Map(
+      counts.map((c) => [c.userId.toString(), c._count._all]),
+    );
+  }
+
+  // 4. Attach mutualCount + sort (mutualCount DESC, id DESC tie-break)
+  const ranked = candidates
+    .map((u) => ({
+      id: u.id,
+      userName: u.userName,
+      displayName: u.profile?.displayName || u.userName,
+      avatar: u.profile?.avatar || null,
+      mutualFriendsCount: mutualMap.get(u.id.toString()) || 0,
+    }))
+    .sort((a, b) => {
+      if (b.mutualFriendsCount !== a.mutualFriendsCount) {
+        return b.mutualFriendsCount - a.mutualFriendsCount;
+      }
+      // Tie-break: newer id first (BigInt compare)
+      return a.id > b.id ? -1 : a.id < b.id ? 1 : 0;
+    });
+
+  // 5. Take top N + serialize BigInt id
+  const top = ranked.slice(0, take).map((u) => ({
+    ...u,
+    id: u.id.toString(),
+  }));
+
+  return { data: top };
 };

@@ -2,6 +2,7 @@ import express from "express";
 import {
   authMe,
   fillBaseProfile,
+  getFriendSuggestions,
   getUserProfile,
   searchUsers,
   updateProfile,
@@ -27,6 +28,9 @@ router.put(
 router.post("/infor", fillBaseProfile);
 
 router.get("/search", searchUsers);
+
+// Friend suggestions (FB-like "People you may know") — literal path, đặt TRƯỚC /:userId
+router.get("/suggestions", getFriendSuggestions);
 
 // Xem profile user khác (block-aware) — đặt TRƯỚC nestedUserFriendRoute
 // để Express match /:userId/profile trước khi rơi vào sub-router.
