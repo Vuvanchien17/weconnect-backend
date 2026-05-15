@@ -1,6 +1,7 @@
 import { cloudinary } from "../config/cloudinary.js";
 import {
   fillBaseProfileService,
+  getFriendSuggestionsService,
   getMeService,
   getProfileByUserId,
   getUserProfileByIdService,
@@ -165,6 +166,23 @@ export const fillBaseProfile = async (req, res) => {
     });
   } catch (error) {
     console.log("Error fill base profile: ", error);
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+// GET /users/suggestions?limit=10 — friend suggestions (FB-like "People you may know")
+// Trả top N user chưa phải bạn / chưa pending / chưa block, ranked by mutual friends count.
+export const getFriendSuggestions = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { limit } = req.query;
+    const result = await getFriendSuggestionsService({ userId, limit });
+    return res.status(200).json({
+      message: "Get suggestions successfully.",
+      ...result,
+    });
+  } catch (error) {
+    console.error("Error getFriendSuggestions:", error);
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };
