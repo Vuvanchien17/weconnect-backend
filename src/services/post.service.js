@@ -322,7 +322,12 @@ export const getPostByIdService = async (postId, currentUserId) => {
 // stats.reactions: { total, topTypes (top 3 emoji), myReaction }
 // stats.comments: { total }
 // TODO: thêm shares vào stats sau khi làm xong feature share
-export const getPostsService = async ({ userId, cursor, limit, currentUserId }) => {
+export const getPostsService = async ({
+  userId,
+  cursor,
+  limit,
+  currentUserId,
+}) => {
   const take = Math.min(Math.max(Number(limit) || 10, 1), 50);
 
   // Get friend + block list của current user (parallel)
@@ -375,6 +380,7 @@ export const getPostsService = async ({ userId, cursor, limit, currentUserId }) 
       id: formatted.id,
       author: {
         id: formatted.user.id,
+        username: formatted.user.userName,
         displayName:
           formatted.user.profile?.displayName || formatted.user.userName,
         avatar: formatted.user.profile?.avatar || null,

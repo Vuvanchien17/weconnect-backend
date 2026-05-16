@@ -4,7 +4,7 @@ import {
   getFriendSuggestionsService,
   getMeService,
   getProfileByUserId,
-  getUserProfileByIdService,
+  getUserProfileByUsernameService,
   searchUsersService,
   updateProfileService,
   getProfileByPhoneNumber,
@@ -102,6 +102,7 @@ export const updateProfile = async (req, res) => {
   }
 };
 
+// GET /users/search?q=chie
 export const searchUsers = async (req, res) => {
   try {
     // according to convention
@@ -125,14 +126,17 @@ export const searchUsers = async (req, res) => {
   }
 };
 
-// GET /users/:userId/profile — xem profile user khác (hoặc chính mình)
+// GET /users/:username/profile — xem profile user khác (hoặc chính mình) theo username
 // Trả 404 nếu: user không tồn tại / đã xóa / có quan hệ block 2 chiều
 export const getUserProfile = async (req, res) => {
   try {
-    const { userId } = req.params;
+    const { username } = req.params;
     const currentUserId = req.user.id;
 
-    const profile = await getUserProfileByIdService(userId, currentUserId);
+    const profile = await getUserProfileByUsernameService(
+      username,
+      currentUserId,
+    );
     if (!profile) {
       return res.status(404).json({ message: "User not found." });
     }
@@ -149,10 +153,10 @@ export const getUserProfile = async (req, res) => {
 
 export const fillBaseProfile = async (req, res) => {
   try {
-    const { displayName, phoneNumber, gender, birthDay } = req.body;
+    const { username, displayName, phoneNumber, gender, birthDay } = req.body;
     const userId = req.user.id;
 
-    if (!displayName || !phoneNumber || !gender || !birthDay) {
+    if (!username || !displayName || !phoneNumber || !gender || !birthDay) {
       return res.status(400).json({
         message: "Please fill in all the information",
       });

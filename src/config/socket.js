@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 
 // Singleton io instance — set khi initSocket() được gọi từ server.js
 let io = null;
+const onlineUsers = new Map(); // userId -> socketId
 
 // ============ INIT (gọi 1 lần ở server.js sau khi httpServer ready) ============
 export const initSocket = (httpServer) => {
@@ -37,10 +38,27 @@ export const initSocket = (httpServer) => {
     // 1 user có thể mở nhiều tab/device → tất cả socket cùng userId join chung room
     // → emit 1 lần broadcast tới mọi tab/device đang online.
     socket.join(`user:${userId}`);
+    socket.on("user:online", (userId) => {
+      onlineUsers.set(userId, socket.id);
+
+      // Gửi cho tất cả biết user này online
+      io.emit("user:status", { userId, status: "online" });
+
+      // Gửi lại danh sách online cho chính user vừa vào
+      socket.emit("user:list", Array.from(onlineUsers.keys()));
+    });
 
     console.log(`Socket connected: user ${userId} (socket id: ${socket.id})`);
 
     socket.on("disconnect", () => {
+      for (let [userId, socketId] of onlineUsers) {
+        if (socketId === socket.id) {
+          onlineUsers.delete(userId);
+          // gửi tới tất cả user
+          io.emit("user:status", { userId, status: "offline" });
+          break;
+        }
+      }
       console.log(`Socket disconnected: user ${userId}`);
     });
   });

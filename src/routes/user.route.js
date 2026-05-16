@@ -32,9 +32,11 @@ router.get("/search", searchUsers);
 // Friend suggestions (FB-like "People you may know") — literal path, đặt TRƯỚC /:userId
 router.get("/suggestions", getFriendSuggestions);
 
-// Xem profile user khác (block-aware) — đặt TRƯỚC nestedUserFriendRoute
-// để Express match /:userId/profile trước khi rơi vào sub-router.
-router.get("/:userId/profile", getUserProfile);
+// Xem profile user khác theo USERNAME (block-aware) — đặt TRƯỚC nestedUserFriendRoute
+// để Express match /:username/profile trước khi rơi vào sub-router.
+// Note: friend nested routes vẫn dùng /:userId (BigInt id), không username.
+// FE lấy id từ response profile để gọi friend endpoints.
+router.get("/:username/profile", getUserProfile);
 
 // Nested routes — /users/:userId/friends + /users/:userId/friend-status
 router.use("/:userId", nestedUserFriendRoute);

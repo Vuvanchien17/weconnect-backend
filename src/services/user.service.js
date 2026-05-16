@@ -89,39 +89,24 @@ export const getMeService = async (userId) => {
   };
 };
 
-// ============ GET PROFILE BY ID (xem profile user khác) ============
+// ============ GET PROFILE BY USERNAME (xem profile user khác) ============
+// Lookup theo `userName` (FB-style URL: facebook.com/<username>).
 // Khác với getMeService: KHÔNG trả email/phoneNumber/role/status (private fields).
 //
 // Block-aware: nếu giữa current user và target có quan hệ block (cả 2 chiều)
 // → trả null (controller → 404, information hiding) — KHÔNG để lộ user tồn tại.
 //
-// Tự xem profile mình (targetUserId === currentUserId) cũng OK — FE simplify
-// chỉ cần 1 endpoint `/users/:userId/profile` cho mọi case.
-export const getUserProfileByIdService = async (
-  targetUserId,
+// Tự xem profile mình (targetUserName === user của me) cũng OK — FE simplify
+// chỉ cần 1 endpoint `/users/:username/profile` cho mọi case.
+export const getUserProfileByUsernameService = async (
+  targetUsername,
   currentUserId,
 ) => {
-  const targetIdBig = BigInt(targetUserId);
   const meBig = BigInt(currentUserId);
 
-  // 1. Check block 2 chiều — chỉ cần 1 row match là ẩn user
-  // UserBlock dùng composite PK [blockerId, blockedId], không có id autoincrement.
-  if (targetIdBig !== meBig) {
-    const block = await prisma.userBlock.findFirst({
-      where: {
-        OR: [
-          { blockerId: meBig, blockedId: targetIdBig },
-          { blockerId: targetIdBig, blockedId: meBig },
-        ],
-      },
-      select: { blockerId: true },
-    });
-    if (block) return null;
-  }
-
-  // 2. Join User + Profile (chỉ public fields)
+  // 1. Find user theo userName (chưa cần lookup block — vì cần id thật trước)
   const user = await prisma.user.findFirst({
-    where: { id: targetIdBig, isDeleted: false },
+    where: { userName: targetUsername, isDeleted: false },
     select: {
       id: true,
       userName: true,
@@ -143,6 +128,21 @@ export const getUserProfileByIdService = async (
 
   if (!user) return null;
 
+  // 2. Check block 2 chiều dựa trên id thật của target (skip nếu là self)
+  // UserBlock dùng composite PK [blockerId, blockedId], không có id autoincrement.
+  if (user.id !== meBig) {
+    const block = await prisma.userBlock.findFirst({
+      where: {
+        OR: [
+          { blockerId: meBig, blockedId: user.id },
+          { blockerId: user.id, blockedId: meBig },
+        ],
+      },
+      select: { blockerId: true },
+    });
+    if (block) return null;
+  }
+
   const { profile, ...userFields } = user;
   return {
     ...userFields,
@@ -158,68 +158,107 @@ export const getUserProfileByIdService = async (
 };
 
 export const searchUsersService = async (keyword, currentUserId) => {
-  const users = await prisma.user.findMany({
-    where: {
-      AND: [
-        {
-          OR: [
-            {
-              // find userName
-              userName: { contains: keyword },
-            },
-            {
-              // find displayName
-              profile: {
-                displayName: { contains: keyword },
-              },
-            },
-          ],
-        },
-        { id: { not: BigInt(currentUserId) } },
-        { isDeleted: false },
-      ],
-    },
-    take: 10, // limit 10 user
-    include: {
-      profile: {
-        select: {
-          displayName: true,
-          avatar: true,
-        },
-      },
-    },
-  });
+  const me = BigInt(currentUserId);
 
-  return users.map((user) => ({
-    userId: user.id.toString(),
-    userName: user.userName,
-    displayName: user?.profile?.displayName || user.userName,
-    avatar: user?.profile?.avatar || null,
-  }));
+  // Fetch song song: users match keyword + myFriends (cho mutual count + friendStatus)
+  const [users, myFriends] = await Promise.all([
+    prisma.user.findMany({
+      where: {
+        AND: [
+          {
+            OR: [
+              { userName: { contains: keyword } },
+              { profile: { displayName: { contains: keyword } } },
+            ],
+          },
+          { id: { not: me } },
+          { isDeleted: false },
+        ],
+      },
+      take: 10, // limit 10 user
+      include: {
+        profile: { select: { displayName: true, avatar: true } },
+      },
+    }),
+    getFriendIds(me),
+  ]);
+
+  if (users.length === 0) return [];
+
+  const friendsSet = new Set(myFriends.map((id) => id.toString()));
+
+  // Bulk count mutual friends — skip nếu current user chưa có bạn nào.
+  // Mutual của candidate C = friends của C ∩ friends của me.
+  // 1 query groupBy thay vì N+1 cho từng candidate.
+  let mutualMap = new Map();
+  if (myFriends.length > 0) {
+    const counts = await prisma.friendship.groupBy({
+      by: ["userId"],
+      where: {
+        userId: { in: users.map((u) => u.id) },
+        friendId: { in: myFriends },
+      },
+      _count: { _all: true },
+    });
+    mutualMap = new Map(
+      counts.map((c) => [c.userId.toString(), c._count._all]),
+    );
+  }
+
+  return users.map((user) => {
+    const idStr = user.id.toString();
+    return {
+      userId: idStr,
+      userName: user.userName,
+      displayName: user?.profile?.displayName || user.userName,
+      avatar: user?.profile?.avatar || null,
+      mutualFriendsCount: mutualMap.get(idStr) || 0,
+      friendStatus: friendsSet.has(idStr), // true = đã là bạn, false = chưa
+    };
+  });
 };
 
 export const fillBaseProfileService = async (userId, userData) => {
-  const { displayName, phoneNumber, gender, birthDay } = userData;
+  const { username, displayName, phoneNumber, gender, birthDay } = userData;
+  const me = BigInt(userId);
+
+  // Check username trùng TRƯỚC transaction — fail fast, không insert thừa Profile.
+  // Loại self ra (an toàn nếu user submit lại form — BE idempotent).
+  const userExists = await prisma.user.findFirst({
+    where: {
+      userName: username,
+      id: { not: me },
+    },
+    select: { id: true },
+  });
+  if (userExists) {
+    const err = new Error("Username already exists.");
+    err.status = 409;
+    throw err;
+  }
+
   return await prisma.$transaction(async (tx) => {
     await tx.profile.create({
       data: {
-        userId: userId,
+        userId: me,
         displayName,
         phoneNumber,
         gender,
-        birthDay: new Date(userData.birthDay),
+        birthDay: new Date(birthDay),
       },
     });
 
     // update User
     const updatedUser = await tx.user.update({
-      where: { id: userId },
+      where: { id: me },
       data: {
         isProfileComplete: true, // "Chìa khóa" để lần sau vào thẳng Home
+        userName: username,
       },
       select: {
         id: true,
         email: true,
+        userName: true,
         isProfileComplete: true,
         // Không trả về password ở đây nhé
       },
