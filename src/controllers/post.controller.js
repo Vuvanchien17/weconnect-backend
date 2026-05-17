@@ -9,22 +9,34 @@ import {
 
 export const createPost = async (req, res) => {
   try {
-    const { privacyId, taggedUserIds, collabUserIds, blocks } = req.body;
+    const {
+      privacyId,
+      taggedUserIds,
+      collabUserIds,
+      blocks,
+      excludedUserIds,
+      allowedUserIds,
+    } = req.body;
     const userId = req.user.id;
-    const newPost = await createFullPostService(
-      req?.files,
+    const newPost = await createFullPostService({
+      files: req?.files,
       userId,
       privacyId,
       blocks,
       taggedUserIds,
       collabUserIds,
-    );
+      excludedUserIds,
+      allowedUserIds,
+    });
     return res.status(201).json({
       message: "Create post successfully!",
       post: newPost,
     });
   } catch (error) {
     console.error("Error:", error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
     return res.status(500).json({ message: "Internal Server Error." });
   }
 };
@@ -73,18 +85,27 @@ export const getPosts = async (req, res) => {
 export const updatePost = async (req, res) => {
   try {
     const { id } = req.params;
-    const { privacyId, taggedUserIds, collabUserIds, blocks } = req.body;
+    const {
+      privacyId,
+      taggedUserIds,
+      collabUserIds,
+      blocks,
+      excludedUserIds,
+      allowedUserIds,
+    } = req.body;
     const userId = req.user.id;
 
-    const updated = await updateFullPostService(
-      req?.files,
-      id,
+    const updated = await updateFullPostService({
+      files: req?.files,
+      postId: id,
       userId,
       privacyId,
       blocks,
       taggedUserIds,
       collabUserIds,
-    );
+      excludedUserIds,
+      allowedUserIds,
+    });
 
     return res.status(200).json({
       message: "Update post successfully!",

@@ -82,30 +82,44 @@ export const postBlockSchema = z.discriminatedUnion("type", [
   lifeEventBlockSchema,
 ]);
 
+// Helper: parse FormData array (JSON string "[1,2]" hoặc array native)
+const parseIdArray = (val) => {
+  if (Array.isArray(val)) return val;
+  if (typeof val === "string") {
+    if (val.trim() === "") return [];
+    try {
+      const parsed = JSON.parse(val);
+      return Array.isArray(parsed) ? parsed : [parsed];
+    } catch (e) {
+      return [];
+    }
+  }
+  return val;
+};
+
 export const postSchema = z.object({
   privacyId: z.coerce.number(),
-  taggedUserIds: z.preprocess((val) => {
-    if (typeof val === "string") {
-      try {
-        const parsed = JSON.parse(val);
-        return Array.isArray(parsed) ? parsed : [parsed];
-      } catch (e) {
-        return [];
-      }
-    }
-    return val;
-  }, z.array(z.coerce.number()).default([])),
-  collabUserIds: z.preprocess((val) => {
-    if (typeof val === "string") {
-      try {
-        const parsed = JSON.parse(val);
-        return Array.isArray(parsed) ? parsed : [parsed];
-      } catch (e) {
-        return [];
-      }
-    }
-    return val;
-  }, z.array(z.coerce.number()).default([])),
+  taggedUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
+  collabUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
+  // Audience list cho privacy "friends_except" + "specific_friends".
+  // Service validate dựa trên privacy.name:
+  //   - friends_except → dùng excludedUserIds, ignore allowedUserIds
+  //   - specific_friends → dùng allowedUserIds, ignore excludedUserIds
+  //   - Khác → ignore cả 2
+  excludedUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
+  allowedUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
   blocks: z
     .preprocess(
       (val) => {

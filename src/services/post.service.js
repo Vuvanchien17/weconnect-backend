@@ -13,9 +13,6 @@ import { createNotificationService } from "./notification.service.js";
 //      - public            → ai cũng thấy
 //      - friends + variants → bạn bè HOẶC chính mình
 //      - private           → chỉ chính mình
-//
-// TODO v2: friends_except / specific_friends / custom hiện đang treat như "friends"
-// (cần thêm bảng PostExcludedUser / PostAllowedUser để implement chính xác).
 const buildVisibilityFilters = (currentUserId, friendIds, blockListIds) => {
   const me = BigInt(currentUserId);
   const filters = [];
@@ -25,32 +22,61 @@ const buildVisibilityFilters = (currentUserId, friendIds, blockListIds) => {
     filters.push({ userId: { notIn: blockListIds } });
   }
 
-  // 2. Privacy filter — 3 nhánh OR
+  // 2. Privacy filter — 6 nhánh OR (mỗi privacy type 1 nhánh)
   filters.push({
     OR: [
-      // Nhánh 1: post công khai
+      // Nhánh 1: public — ai cũng thấy
       { postPrivacy: { name: "public" } },
 
-      // Nhánh 2: post bạn bè (gồm cả các loại friends_*) — chỉ owner hoặc friend
+      // Nhánh 2: friends — owner hoặc friend
       {
         AND: [
+          { postPrivacy: { name: "friends" } },
           {
-            postPrivacy: {
-              name: {
-                in: ["friends", "friends_except", "specific_friends", "custom"],
-              },
-            },
+            OR: [{ userId: me }, { userId: { in: friendIds } }],
           },
+        ],
+      },
+
+      // Nhánh 3: friends_except — owner, hoặc (friend AND không bị exclude)
+      {
+        AND: [
+          { postPrivacy: { name: "friends_except" } },
           {
             OR: [
-              { userId: me }, // chính mình
-              { userId: { in: friendIds } }, // bạn bè
+              { userId: me }, // owner luôn thấy
+              {
+                AND: [
+                  { userId: { in: friendIds } },
+                  { excludedUsers: { none: { userId: me } } },
+                ],
+              },
             ],
           },
         ],
       },
 
-      // Nhánh 3: post riêng tư — chỉ owner
+      // Nhánh 4: specific_friends — owner, hoặc viewer trong allowedUsers
+      {
+        AND: [
+          { postPrivacy: { name: "specific_friends" } },
+          {
+            OR: [{ userId: me }, { allowedUsers: { some: { userId: me } } }],
+          },
+        ],
+      },
+
+      // Nhánh 5: custom (TODO Phase 2) — hiện treat như friends
+      {
+        AND: [
+          { postPrivacy: { name: "custom" } },
+          {
+            OR: [{ userId: me }, { userId: { in: friendIds } }],
+          },
+        ],
+      },
+
+      // Nhánh 6: private — chỉ owner
       {
         AND: [{ postPrivacy: { name: "private" } }, { userId: me }],
       },
@@ -69,9 +95,20 @@ const fullPostInclude = {
   postCollaborators: {
     include: { invitee: { include: { profile: true } } },
   },
+  // Audience list cho privacy "friends_except" / "specific_friends"
+  excludedUsers: { include: { user: { include: { profile: true } } } },
+  allowedUsers: { include: { user: { include: { profile: true } } } },
 };
 
-// chuẩn hóa tags/collaborators về shape gọn cho FE
+// Helper: format 1 audience entry (excludedUsers / allowedUsers row) → user compact
+const formatAudienceUser = (entry) => ({
+  userId: entry.user.id,
+  userName: entry.user.userName,
+  displayName: entry.user.profile?.displayName || entry.user.userName,
+  avatar: entry.user.profile?.avatar || null,
+});
+
+// chuẩn hóa tags/collaborators/audience về shape gọn cho FE
 const formatPost = (post) => ({
   ...post,
   postTags: post.postTags.map((tag) => ({
@@ -87,6 +124,10 @@ const formatPost = (post) => ({
     avatar: collab.invitee.profile?.avatar,
     status: collab.status,
   })),
+  // Audience lists — chỉ relevant khi privacy là friends_except / specific_friends
+  // FE dùng để render edit form (preselect các user owner đã exclude/allow)
+  excludedUsers: (post.excludedUsers || []).map(formatAudienceUser),
+  allowedUsers: (post.allowedUsers || []).map(formatAudienceUser),
 });
 
 // lấy danh sách Cloudinary public_id từ postBlocks (image/video)
@@ -96,14 +137,108 @@ const extractCloudinaryIds = (postBlocks) =>
     .map((b) => b.content?.imageId || b.content?.videoId)
     .filter(Boolean);
 
-export const createFullPostService = async (
+// ============ HELPER: Resolve audience list theo privacy type ============
+// Validate + filter `excludedUserIds` / `allowedUserIds` dựa trên privacy.name:
+//   - friends_except → dùng excludedUserIds, allowed phải rỗng
+//   - specific_friends → dùng allowedUserIds, excluded phải rỗng
+//   - custom (Phase 2) — hiện skip cả 2
+//   - Khác (public/friends/private) → cả 2 phải rỗng
+//
+// Mọi userId phải là friend của owner (chống abuse — không thể allow random user).
+// Loại self ra silently.
+//
+// Trả về { audience: BigInt[], audienceType: "excluded"|"allowed"|null }
+const resolveAudience = async (
+  privacyName,
+  ownerId,
+  excludedUserIds,
+  allowedUserIds,
+) => {
+  const owner = BigInt(ownerId);
+
+  if (privacyName === "friends_except") {
+    const ids = (excludedUserIds || [])
+      .filter((id) => id != ownerId)
+      .map((id) => BigInt(id));
+    if (ids.length === 0) {
+      // Cho phép empty (treat như "friends" thuần)
+      return { audience: [], audienceType: "excluded" };
+    }
+    // Validate: tất cả phải là friend của owner
+    const friends = await prisma.friendship.findMany({
+      where: { userId: owner, friendId: { in: ids } },
+      select: { friendId: true },
+    });
+    const friendSet = new Set(friends.map((f) => f.friendId.toString()));
+    const invalid = ids.filter((id) => !friendSet.has(id.toString()));
+    if (invalid.length > 0) {
+      const err = new Error(
+        "excludedUserIds must be friends of the post owner.",
+      );
+      err.status = 400;
+      throw err;
+    }
+    return { audience: ids, audienceType: "excluded" };
+  }
+
+  if (privacyName === "specific_friends") {
+    const ids = (allowedUserIds || [])
+      .filter((id) => id != ownerId)
+      .map((id) => BigInt(id));
+    if (ids.length === 0) {
+      // specific_friends mà không có ai trong list → KHÔNG ai xem được trừ owner.
+      // Cho phép (giống FB UX — user có thể clear list).
+      return { audience: [], audienceType: "allowed" };
+    }
+    const friends = await prisma.friendship.findMany({
+      where: { userId: owner, friendId: { in: ids } },
+      select: { friendId: true },
+    });
+    const friendSet = new Set(friends.map((f) => f.friendId.toString()));
+    const invalid = ids.filter((id) => !friendSet.has(id.toString()));
+    if (invalid.length > 0) {
+      const err = new Error(
+        "allowedUserIds must be friends of the post owner.",
+      );
+      err.status = 400;
+      throw err;
+    }
+    return { audience: ids, audienceType: "allowed" };
+  }
+
+  // public / friends / private / custom → bỏ qua cả 2 list
+  return { audience: [], audienceType: null };
+};
+
+export const createFullPostService = async ({
   files,
   userId,
   privacyId,
   blocks,
   taggedUserIds,
   collabUserIds,
-) => {
+  excludedUserIds = [], // dùng cho friends_except
+  allowedUserIds = [], // dùng cho specific_friends
+}) => {
+  // 0. Lookup privacy name (cần để resolve audience đúng loại)
+  const privacy = await prisma.postPrivacy.findUnique({
+    where: { id: Number(privacyId) },
+    select: { id: true, name: true },
+  });
+  if (!privacy) {
+    const err = new Error("Invalid privacy.");
+    err.status = 400;
+    throw err;
+  }
+
+  // Validate audience list TRƯỚC transaction (fail fast, không insert thừa)
+  const { audience, audienceType } = await resolveAudience(
+    privacy.name,
+    userId,
+    excludedUserIds,
+    allowedUserIds,
+  );
+
   const newPost = await prisma.$transaction(async (tx) => {
     // create new post
     const post = await tx.post.create({
@@ -112,6 +247,17 @@ export const createFullPostService = async (
         privacyId: Number(privacyId),
       },
     });
+
+    // Insert audience nếu có (excluded hoặc allowed) — tùy privacy type
+    if (audienceType === "excluded" && audience.length > 0) {
+      await tx.postExcludedUser.createMany({
+        data: audience.map((uid) => ({ postId: post.id, userId: uid })),
+      });
+    } else if (audienceType === "allowed" && audience.length > 0) {
+      await tx.postAllowedUser.createMany({
+        data: audience.map((uid) => ({ postId: post.id, userId: uid })),
+      });
+    }
 
     // handle blocks
     let imgCounter = 0;
@@ -200,48 +346,11 @@ export const createFullPostService = async (
 
     const result = await tx.post.findUnique({
       where: { id: post.id },
-      include: {
-        postBlocks: {
-          orderBy: { position: "asc" },
-        },
-        postTags: {
-          include: {
-            taggedUser: {
-              include: {
-                profile: true,
-              },
-            },
-          },
-        },
-        postCollaborators: {
-          include: {
-            invitee: {
-              include: {
-                profile: true,
-              },
-            },
-          },
-        },
-      },
+      include: fullPostInclude,
     });
 
-    // return response forward to controller
-    return {
-      ...result,
-      postTags: result.postTags.map((tag) => ({
-        userId: tag.taggedUser.id,
-        userName: tag.taggedUser.userName,
-        displayName: tag.taggedUser.profile?.displayName,
-        avatar: tag.taggedUser.profile?.avatar,
-      })),
-      postCollaborators: result.postCollaborators.map((collab) => ({
-        userId: collab.invitee.id,
-        userName: collab.invitee.userName,
-        displayName: collab.invitee.profile?.displayName,
-        avatar: collab.invitee.profile?.avatar,
-        status: collab.status,
-      })),
-    };
+    // return formatted (gồm cả excludedUsers/allowedUsers)
+    return formatPost(result);
   });
 
   // Notification cho user được tag — best-effort, fire sau khi transaction commit.
@@ -409,9 +518,9 @@ export const getPostsService = async ({
 };
 
 // ============ UPDATE ============
-// Chiến lược: full-replace. Xóa hết postBlocks/tags/collaborators cũ rồi insert lại.
+// Chiến lược: full-replace. Xóa hết postBlocks/tags/collaborators/audience cũ rồi insert lại.
 // Cloudinary file cũ không có trong payload mới sẽ bị destroy.
-export const updateFullPostService = async (
+export const updateFullPostService = async ({
   files,
   postId,
   userId,
@@ -419,7 +528,9 @@ export const updateFullPostService = async (
   blocks,
   taggedUserIds,
   collabUserIds,
-) => {
+  excludedUserIds = [],
+  allowedUserIds = [],
+}) => {
   // 1. Check tồn tại + ownership
   // include postTags để diff với tag mới sau update → chỉ noti user MỚI được tag.
   const existing = await prisma.post.findUnique({
@@ -441,6 +552,23 @@ export const updateFullPostService = async (
     throw err;
   }
 
+  // Lookup privacy name + validate audience (fail fast trước transaction)
+  const privacy = await prisma.postPrivacy.findUnique({
+    where: { id: Number(privacyId) },
+    select: { id: true, name: true },
+  });
+  if (!privacy) {
+    const err = new Error("Invalid privacy.");
+    err.status = 400;
+    throw err;
+  }
+  const { audience, audienceType } = await resolveAudience(
+    privacy.name,
+    userId,
+    excludedUserIds,
+    allowedUserIds,
+  );
+
   const oldCloudinaryIds = extractCloudinaryIds(existing.postBlocks);
 
   // 2. Transaction: xóa cũ + insert mới + update meta
@@ -450,6 +578,9 @@ export const updateFullPostService = async (
     await tx.postCollaborator.deleteMany({
       where: { postId: BigInt(postId) },
     });
+    // Xóa cả audience cũ (full-replace) — bất kể privacy mới là gì
+    await tx.postExcludedUser.deleteMany({ where: { postId: BigInt(postId) } });
+    await tx.postAllowedUser.deleteMany({ where: { postId: BigInt(postId) } });
 
     await tx.post.update({
       where: { id: BigInt(postId) },
@@ -458,6 +589,17 @@ export const updateFullPostService = async (
         isEdited: true,
       },
     });
+
+    // Insert audience mới theo privacy.name
+    if (audienceType === "excluded" && audience.length > 0) {
+      await tx.postExcludedUser.createMany({
+        data: audience.map((uid) => ({ postId: BigInt(postId), userId: uid })),
+      });
+    } else if (audienceType === "allowed" && audience.length > 0) {
+      await tx.postAllowedUser.createMany({
+        data: audience.map((uid) => ({ postId: BigInt(postId), userId: uid })),
+      });
+    }
 
     // handle blocks (cùng logic với create)
     let imgCounter = 0;
