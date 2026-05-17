@@ -133,10 +133,8 @@ export const getUserProfileByUsernameService = async (
   if (user.id !== meBig) {
     const block = await prisma.userBlock.findFirst({
       where: {
-        OR: [
-          { blockerId: meBig, blockedId: user.id },
-          { blockerId: user.id, blockedId: meBig },
-        ],
+        blockerId: user.id,
+        blockedId: meBig,
       },
       select: { blockerId: true },
     });

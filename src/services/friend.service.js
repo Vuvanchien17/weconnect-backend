@@ -170,9 +170,7 @@ export const acceptFriendRequestService = async (requestId, currentUserId) => {
     throw err;
   }
   if (request.receiverId !== currentUser) {
-    const err = new Error(
-      "You don't have permission to accept this request.",
-    );
+    const err = new Error("You don't have permission to accept this request.");
     err.status = 403;
     throw err;
   }
@@ -231,9 +229,7 @@ export const rejectFriendRequestService = async (requestId, currentUserId) => {
     throw err;
   }
   if (request.receiverId !== currentUser) {
-    const err = new Error(
-      "You don't have permission to reject this request.",
-    );
+    const err = new Error("You don't have permission to reject this request.");
     err.status = 403;
     throw err;
   }
@@ -267,9 +263,7 @@ export const cancelFriendRequestService = async (requestId, currentUserId) => {
     throw err;
   }
   if (request.senderId !== currentUser) {
-    const err = new Error(
-      "You don't have permission to cancel this request.",
-    );
+    const err = new Error("You don't have permission to cancel this request.");
     err.status = 403;
     throw err;
   }
