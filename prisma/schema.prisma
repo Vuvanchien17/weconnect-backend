@@ -63,6 +63,9 @@ model User {
   // Comment user đã viết
   comments Comment[]
 
+  // Audience list cho post privacy (friends_except / specific_friends)
+  postExcludedFrom PostExcludedUser[] @relation("PostExcludedUsers")
+  postAllowedTo    PostAllowedUser[]  @relation("PostAllowedUsers")
 }
 
 enum AuthType {
@@ -218,6 +221,10 @@ model Post {
   postCollaborators PostCollaborator[]
   postReactions PostReaction[]
   comments Comment[]
+
+  // Audience list cho privacy "friends_except" / "specific_friends"
+  excludedUsers PostExcludedUser[]
+  allowedUsers  PostAllowedUser[]
 
   @@index([userId, createdAt])
   @@index([isDeleted])  // choose posts do not delete yet
@@ -394,4 +401,33 @@ model Comment {
   @@index([parentId, createdAt])
   @@index([userId])
 }
+
+// for privacy "friends_except" — user TRONG bảng KHÔNG xem được post dù là friend
+model PostExcludedUser {
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  userId BigInt
+  user User @relation("PostExcludedUsers", fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([postId, userId])
+  @@index([userId])
+}
+
+// for privacy "specific_friends" (+ custom-allow) — CHỈ user TRONG bảng xem được
+model PostAllowedUser {
+  postId BigInt
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  userId BigInt
+  user User @relation("PostAllowedUsers", fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  @@id([postId, userId])
+  @@index([userId])
+}
+
 
