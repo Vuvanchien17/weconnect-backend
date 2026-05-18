@@ -4,7 +4,10 @@ import {
   deletePostService,
   getPostByIdService,
   getPostsService,
+  hidePostService,
+  unhidePostService,
   updateFullPostService,
+  updatePostPrivacyService,
 } from "../services/post.service.js";
 
 export const createPost = async (req, res) => {
@@ -128,6 +131,73 @@ export const deletePost = async (req, res) => {
     await deletePostService(id, userId);
 
     return res.status(200).json({ message: "Delete post successfully!" });
+  } catch (error) {
+    console.error(error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+// endpoint /posts/:id/hide  method post
+export const hidePost = async (req, res) => {
+  try {
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+
+    await hidePostService(userId, postId);
+    return res.status(200).json({
+      message: "Hide post successfully!",
+    });
+  } catch (error) {
+    console.error(error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+// endpoint /posts/:id/hide  method delete
+export const unhidePost = async (req, res) => {
+  try {
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+
+    await unhidePostService(userId, postId);
+    return res.status(200).json({
+      message: "Unhide post successfully!",
+    });
+  } catch (error) {
+    console.error(error);
+    if (error.status) {
+      return res.status(error.status).json({ message: error.message });
+    }
+    return res.status(500).json({ message: "Internal Server Error." });
+  }
+};
+
+// PATCH /posts/:id/privacy — chỉ update privacy + audience (KHÔNG đụng content)
+// Body JSON: { privacyId, excludedUserIds?, allowedUserIds? }
+export const updatePostPrivacy = async (req, res) => {
+  try {
+    const { id: postId } = req.params;
+    const userId = req.user.id;
+    const { privacyId, excludedUserIds, allowedUserIds } = req.body;
+
+    const updated = await updatePostPrivacyService({
+      postId,
+      userId,
+      privacyId,
+      excludedUserIds,
+      allowedUserIds,
+    });
+
+    return res.status(200).json({
+      message: "Privacy updated.",
+      post: updated,
+    });
   } catch (error) {
     console.error(error);
     if (error.status) {

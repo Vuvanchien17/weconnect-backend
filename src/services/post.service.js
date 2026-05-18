@@ -451,10 +451,14 @@ export const getPostsService = async ({
     blockListIds,
   );
 
-  // AND combine: base + profile filter (nếu có) + visibility
+  // AND combine: base + hide filter + profile filter (nếu có) + visibility
+  // Note: relation name là `hiddedPost` (theo schema hiện tại, sẽ fix typo sau →
+  // `hiddenPosts`). `{ none: ... }` = không có row nào trong hidePost match điều kiện
+  // → tức là currentUser CHƯA ẩn post này.
   const where = {
     AND: [
       { isDeleted: false },
+      { hiddedPost: { none: { userId: BigInt(currentUserId) } } },
       ...(userId ? [{ userId: BigInt(userId) }] : []),
       ...visibilityFilters,
     ],
@@ -752,4 +756,108 @@ export const deletePostService = async (postId, userId) => {
     where: { id: BigInt(postId) },
     data: { isDeleted: true },
   });
+};
+
+// hidden post
+export const hidePostService = async (userId, postId) => {
+  return await prisma.hidePost.create({
+    data: {
+      postId: BigInt(postId),
+      userId: BigInt(userId),
+    },
+  });
+};
+
+// unhide post
+export const unhidePostService = async (userId, postId) => {
+  return prisma.hidePost.delete({
+    where: {
+      postId_userId: {
+        userId: BigInt(userId),
+        postId: BigInt(postId),
+      },
+    },
+  });
+};
+
+// ============ UPDATE POST PRIVACY (chỉ privacy + audience) ============
+// Khác với updateFullPostService: KHÔNG đụng blocks/tags/collaborators/files.
+// Dùng cho UX FB "Edit Audience" trên post — owner click icon privacy đổi mà
+// không edit content.
+//
+// Flow:
+//   1. Verify post tồn tại + ownership
+//   2. Validate privacyId + resolve audience (reuse helper)
+//   3. Transaction: delete audience cũ + update privacy + insert audience mới
+//   4. Return formatted post (shape giống GET /posts/:id)
+export const updatePostPrivacyService = async ({
+  postId,
+  userId,
+  privacyId,
+  excludedUserIds = [],
+  allowedUserIds = [],
+}) => {
+  // 1. Verify post + ownership
+  const existing = await prisma.post.findUnique({
+    where: { id: BigInt(postId) },
+    select: { id: true, userId: true, isDeleted: true },
+  });
+  if (!existing || existing.isDeleted) {
+    const err = new Error("Post not found.");
+    err.status = 404;
+    throw err;
+  }
+  if (existing.userId !== BigInt(userId)) {
+    const err = new Error("You don't have permission to update this post.");
+    err.status = 403;
+    throw err;
+  }
+
+  // 2. Validate privacy name + resolve audience (fail fast)
+  const privacy = await prisma.postPrivacy.findUnique({
+    where: { id: Number(privacyId) },
+    select: { id: true, name: true },
+  });
+  if (!privacy) {
+    const err = new Error("Invalid privacy.");
+    err.status = 400;
+    throw err;
+  }
+  const { audience, audienceType } = await resolveAudience(
+    privacy.name,
+    userId,
+    excludedUserIds,
+    allowedUserIds,
+  );
+
+  // 3. Transaction: full-replace audience theo privacy mới
+  const updated = await prisma.$transaction(async (tx) => {
+    // Xóa cả 2 list cũ — bất kể privacy mới là gì
+    await tx.postExcludedUser.deleteMany({ where: { postId: BigInt(postId) } });
+    await tx.postAllowedUser.deleteMany({ where: { postId: BigInt(postId) } });
+
+    // Update privacy. KHÔNG set isEdited=true vì privacy đổi không phải edit content
+    await tx.post.update({
+      where: { id: BigInt(postId) },
+      data: { privacyId: Number(privacyId) },
+    });
+
+    // Insert audience mới theo privacy.name
+    if (audienceType === "excluded" && audience.length > 0) {
+      await tx.postExcludedUser.createMany({
+        data: audience.map((uid) => ({ postId: BigInt(postId), userId: uid })),
+      });
+    } else if (audienceType === "allowed" && audience.length > 0) {
+      await tx.postAllowedUser.createMany({
+        data: audience.map((uid) => ({ postId: BigInt(postId), userId: uid })),
+      });
+    }
+
+    return tx.post.findUnique({
+      where: { id: BigInt(postId) },
+      include: fullPostInclude,
+    });
+  });
+
+  return formatPost(updated);
 };
