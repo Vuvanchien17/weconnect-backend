@@ -148,3 +148,17 @@ export const postSchema = z.object({
       }),
     ),
 });
+
+// PATCH /posts/:id/privacy — body JSON, không multipart
+// Chỉ update privacyId + audience lists. Không đụng blocks/tags/collaborators/files.
+export const updatePostPrivacySchema = z.object({
+  privacyId: z.coerce.number().int().positive("Invalid privacyId."),
+  excludedUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
+  allowedUserIds: z.preprocess(
+    parseIdArray,
+    z.array(z.coerce.number()).default([]),
+  ),
+});
