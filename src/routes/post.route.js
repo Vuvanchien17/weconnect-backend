@@ -4,10 +4,16 @@ import {
   deletePost,
   getPostById,
   getPosts,
+  hidePost,
+  unhidePost,
   updatePost,
+  updatePostPrivacy,
 } from "../controllers/post.controller.js";
 import { validate } from "../middlewares/validate.middleware.js";
-import { postSchema } from "../validations/post.schema.js";
+import {
+  postSchema,
+  updatePostPrivacySchema,
+} from "../validations/post.schema.js";
 import { uploadCloud } from "../config/cloudinary.js";
 import reactionRoute from "./reaction.route.js";
 import { nestedCommentRoute } from "./comment.route.js";
@@ -46,5 +52,16 @@ router.put(
 );
 
 router.delete("/:id", deletePost);
+
+// PATCH chỉ privacy + audience (không đụng content/files)
+router.patch(
+  "/:id/privacy",
+  validate(updatePostPrivacySchema),
+  updatePostPrivacy,
+);
+
+router.post("/:id/hide", hidePost);
+
+router.delete("/:id/hide", unhidePost);
 
 export default router;
